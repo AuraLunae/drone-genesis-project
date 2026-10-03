@@ -113,7 +113,12 @@ class WindHoverEnv:
         self.scene.build(n_envs=num_envs)
 
         # ドローンのCOMリンク(風・外乱力を加える対象)
-        self.com_link = self.drone.links[self.drone.COM_link_idx]
+        # 注: Genesis 1.4.3時点では DroneEntity.COM_link_idx が未初期化(内部属性
+        # _COM_link_idx が設定されずAttributeErrorになる)バグがあるため、
+        # COM_link_idx経由ではなく、CF2XのURDFに実在するリンク名"base_link"を
+        # 直接指定して取得する。Genesis側でこのバグが修正されたら
+        # COM_link_idx経由に戻してよい。
+        self.com_link = self.drone.get_link("base_link")
 
         # 事前学習時と同じく、報酬スケールにdtを乗じる
         self.reward_functions, self.episode_sums = dict(), dict()

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Wind-resistant drone hovering RL on Genesis World (DroneEntity/CF2X) with rsl-rl-lib"
 requires-python = ">=3.10,<3.14"  # torch(cu126)のwheelがcp313までのため、3.14が自動選択されないよう上限を設定
 dependencies = [
-    "torch",
+    "torch>=2.8.0",  # Genesisがtorch<2.8.0を非サポートと警告するため明示的に固定
     "genesis-world",
     "rsl-rl-lib>=5.0.0",
     "tensordict",
