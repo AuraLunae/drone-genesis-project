@@ -119,6 +119,13 @@ class WindHoverEnv:
         # 直接指定して取得する。Genesis側でこのバグが修正されたら
         # COM_link_idx経由に戻してよい。
         self.com_link = self.drone.get_link("base_link")
+        self.com_link_idx = self.com_link.idx
+
+        # 風を加えるAPIはRigidLink/RigidEntity側ではなく、ソルバー側の
+        # apply_links_external_force(force, links_idx, envs_idx, ref, local)。
+        # このバージョンにはpos引数が無く、ref="link_com"で重心に力を加える
+        # (=トルクを発生させない純粋な並進力)扱いになる。
+        self.rigid_solver = self.drone.solver
 
         # 事前学習時と同じく、報酬スケールにdtを乗じる
         self.reward_functions, self.episode_sums = dict(), dict()
@@ -174,7 +181,12 @@ class WindHoverEnv:
             self.wind_theta.unsqueeze(1) * (self.wind_mean - self.wind_vec) * self.dt
             + self.wind_sigma.unsqueeze(1) * math.sqrt(self.dt) * noise
         )
-        self.com_link.apply_external_force(self.wind_vec, local=False)
+        self.rigid_solver.apply_links_external_force(
+            self.wind_vec.unsqueeze(1),  # (num_envs, 3) -> (num_envs, 1, 3): 対象リンクが1つのため
+            links_idx=[self.com_link_idx],
+            ref="link_com",
+            local=False,
+        )
 
     def _at_target(self):
         return (
