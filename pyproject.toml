@@ -1,0 +1,24 @@
+[project]
+name = "drone-genesis-project"
+version = "0.1.0"
+description = "Wind-resistant drone hovering RL on Genesis World (DroneEntity/CF2X) with rsl-rl-lib"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "genesis-world",
+    "rsl-rl-lib>=5.0.0",
+    "tensordict",
+    "tensorboard",
+]
+
+# PyTorchはCUDAビルドをuvのindexで明示的に指定する。
+# 使っているCUDAバージョンに合わせて書き換えること(下記はCUDA 12.6の例)。
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu126" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
