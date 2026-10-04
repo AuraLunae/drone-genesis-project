@@ -3,13 +3,21 @@ WindHoverEnv の学習スクリプト。
 ベース: https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/examples/drone/hover_train.py
 
 実行例:
+  # 新規学習(logs/wind-hovering/{タイムスタンプ}/ に保存される)
   python train.py -e wind-hovering -b 8192 --max-iterations 301
+
+  # 中断・終了後、続きから追加学習(最新のランを自動検出)
+  python train.py -e wind-hovering -b 8192 --max-iterations 200 --resume latest
+
+  # 特定のランから追加学習
+  python train.py -e wind-hovering -b 8192 --max-iterations 200 --resume logs/wind-hovering/20261004_120000
 """
 
 import argparse
 import os
 import pickle
-import shutil
+import signal
+import sys
 from importlib import metadata
 
 try:
@@ -22,6 +30,7 @@ from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
 from wind_hover_env import WindHoverEnv
+from run_utils import new_run_dir, resolve_resume_target
 
 
 def get_train_cfg(exp_name):
@@ -58,7 +67,10 @@ def get_train_cfg(exp_name):
         },
         "obs_groups": {"actor": ["policy"], "critic": ["policy"]},
         "num_steps_per_env": 100,
-        "save_interval": 100,
+        # 中断時に失われる学習量を抑えるため、公式サンプルの100より短い間隔で
+        # 保存する(保存1回あたりのコストは小さいので、頻度を上げても
+        # 学習速度への影響は軽微)。
+        "save_interval": 25,
         "run_name": exp_name,
         "logger": "tensorboard",
     }
@@ -93,8 +105,13 @@ def get_cfgs():
     }
     reward_cfg = {
         "yaw_lambda": -10.0,
+        # distance_penalty(tanh)がこの距離[m]あたりでほぼ頭打ち(-1近く)になる
+        "distance_penalty_scale_m": 1.0,
         "reward_scales": {
-            "target": 10.0,
+            "target": 5.0,            # 進歩報酬(差分)。学習を加速させる役割
+            "distance_penalty": 1.0,  # 遠いこと自体への継続的減点(tanhで頭打ち)
+            "at_target_bonus": 3.0,   # 目標付近に留まることへの加点
+            "alive": 0.5,             # 生存ボーナス(墜落以外は毎ステップ加点)
             "smooth": -1e-4,
             "yaw": 0.01,
             "angular": -2e-4,
@@ -125,26 +142,38 @@ def main():
     parser.add_argument("-e", "--exp-name", type=str, default="wind-hovering")
     parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     parser.add_argument("-b", "--num-envs", type=int, default=8192, help="Number of parallel environments")
-    parser.add_argument("--max-iterations", type=int, default=301)
+    parser.add_argument("--max-iterations", type=int, default=301, help="新規学習なら総イテレーション数、--resume指定時はそこからの追加イテレーション数")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="追加学習したい場合に指定。'latest'で最新ラン、またはランディレクトリ/チェックポイントファイルのパス",
+    )
     args = parser.parse_args()
 
     # 8192並列などの大規模学習にはGPUが必須。VRAMが足りない場合は -b で下げること。
     gs.init(backend=gs.gpu, precision="32", logging_level="warning", seed=args.seed, performance_mode=True)
 
-    log_dir = f"logs/{args.exp_name}"
-    env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg = get_cfgs()
-    train_cfg = get_train_cfg(args.exp_name)
+    resume_ckpt_path = None
 
-    if os.path.exists(log_dir):
-        shutil.rmtree(log_dir)
-    os.makedirs(log_dir, exist_ok=True)
-
-    if args.vis:
-        env_cfg["visualize_target"] = True
-
-    with open(f"{log_dir}/cfgs.pkl", "wb") as f:
-        pickle.dump([env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg, train_cfg], f)
+    if args.resume:
+        # 既存のランに追記する(タイムスタンプは新規発行しない = 衝突しない)
+        log_dir, resume_ckpt_path = resolve_resume_target(args.resume, args.exp_name)
+        with open(os.path.join(log_dir, "cfgs.pkl"), "rb") as f:
+            env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg, train_cfg = pickle.load(f)
+        print(f"=== 追加学習: {log_dir} / チェックポイント: {resume_ckpt_path} ===")
+    else:
+        # 新規学習: 必ず新しいタイムスタンプのディレクトリを発行するので、
+        # 既存のランと衝突・上書きすることは起きない
+        log_dir = new_run_dir(args.exp_name)
+        env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg = get_cfgs()
+        train_cfg = get_train_cfg(args.exp_name)
+        if args.vis:
+            env_cfg["visualize_target"] = True
+        with open(os.path.join(log_dir, "cfgs.pkl"), "wb") as f:
+            pickle.dump([env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg, train_cfg], f)
+        print(f"=== 新規学習: {log_dir} ===")
 
     env = WindHoverEnv(
         num_envs=args.num_envs,
@@ -157,16 +186,40 @@ def main():
     )
 
     runner = OnPolicyRunner(env, train_cfg, log_dir, device=gs.device)
-    runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
+    if resume_ckpt_path is not None:
+        runner.load(resume_ckpt_path)
+
+    # 中断(Ctrl+C)や予期しない例外発生時でも、その時点の重みを緊急保存してから
+    # 終了する。これにより save_interval の定期保存を待たずに済み、
+    # 「途中で終わっても学習が無駄にならない」ようにする。
+    interrupted_path = os.path.join(log_dir, "model_interrupted.pt")
+
+    def _save_on_signal(signum, frame):
+        print(f"\n=== 中断を検知。緊急保存: {interrupted_path} ===")
+        runner.save(interrupted_path)
+        sys.exit(1)
+
+    signal.signal(signal.SIGINT, _save_on_signal)
+    signal.signal(signal.SIGTERM, _save_on_signal)
+
+    try:
+        runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
+    except Exception:
+        print(f"\n=== 例外発生。緊急保存: {interrupted_path} ===")
+        runner.save(interrupted_path)
+        raise
 
 
 if __name__ == "__main__":
     main()
 
 """
-# 学習実行
+# 新規学習(logs/wind-hovering/{タイムスタンプ}/ に保存される)
 python train.py -e wind-hovering -b 8192 --max-iterations 301
 
-# TensorBoardでログ確認
+# TensorBoardでログ確認(exp-name配下の全ランをまとめて見られる)
 tensorboard --logdir logs/wind-hovering
+
+# 中断・終了後、続きから追加学習
+python train.py -e wind-hovering -b 8192 --max-iterations 200 --resume latest
 """

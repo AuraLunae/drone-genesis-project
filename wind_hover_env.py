@@ -310,9 +310,31 @@ class WindHoverEnv:
         self._update_observation()
         return self.get_observations()
 
-    # ---- 報酬関数(公式HoverEnvと同一) ---- #
+    # ---- 報酬関数 ---- #
     def _reward_target(self):
+        """進歩報酬(公式HoverEnvと同一、potential-basedなので最適方策を変えずに学習を加速する)"""
         return torch.sum(torch.square(self.last_rel_pos), dim=1) - torch.sum(torch.square(self.rel_pos), dim=1)
+
+    def _reward_alive(self):
+        """生存ボーナス: クラッシュしない限り毎ステップ一定値。
+        「遠くにいる減点」の累積が「生き残る価値」を上回って、わざと早く
+        墜落した方が得、という誤学習を防ぐための土台。"""
+        return torch.ones((self.num_envs,), device=gs.device, dtype=gs.tc_float)
+
+    def _reward_distance_penalty(self):
+        """「遠くにいること」自体へのジワジワ減点。tanhで頭打ちにすることで
+        無限に悪化しないようにする(生存ボーナスを食いつぶさないため)。
+        distance_penalty_scale_m 付近の距離でペナルティが概ね最大(-1)に近づく。"""
+        dist = torch.norm(self.rel_pos, dim=1)
+        d0 = self.reward_cfg["distance_penalty_scale_m"]
+        return -torch.tanh(dist / d0)
+
+    def _reward_at_target_bonus(self):
+        """目標半径内に実際にいる間、毎ステップ明示的に加点する。
+        _reward_target は「近づいた差分」にしか報酬を与えないため、
+        「目標付近に留まり続ける」ことそのものへの加点をここで補う。"""
+        dist = torch.norm(self.rel_pos, dim=1)
+        return (dist < self.env_cfg["at_target_threshold"]).float()
 
     def _reward_smooth(self):
         return torch.sum(torch.square(self.actions - self.last_actions), dim=1)
