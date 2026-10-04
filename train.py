@@ -74,8 +74,12 @@ def get_train_cfg(exp_name):
 def get_cfgs():
     env_cfg = {
         "num_actions": 4,
-        "termination_if_roll_greater_than": 180,
-        "termination_if_pitch_greater_than": 180,
+        # 180度(=実質的に無制限)だと、学習初期の暴れた方策が宙返り・スピンし
+        # 続けてもエピソードが打ち切られず、角速度が際限なく積み上がって
+        # 物理シミュレーションがNaNで発散する一因になる。現実的な値に絞り、
+        # 「ひっくり返ったら即座に打ち切る」ことで数値安定性と学習効率を両立する。
+        "termination_if_roll_greater_than": 60,
+        "termination_if_pitch_greater_than": 60,
         "termination_if_close_to_ground": 0.1,
         "termination_if_x_greater_than": 3.0,
         "termination_if_y_greater_than": 3.0,
