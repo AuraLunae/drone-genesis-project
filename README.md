@@ -8,7 +8,18 @@
 * 風: Ornstein-Uhlenbeck過程(OU過程)による時間変化する乱気流。エピソードごとに強さ・方向・乱れ方を再抽選(ドメインランダム化)
 * 16384並列での学習を成功させようとしている。現在は報酬モデルを「遠さへの継続減点+生存ボーナス+目標到達ボーナス」の構成に拡張したところです。
 * やりたいこと:
-  * seaborn で、綺麗なグラスを描きたい
+  * seabornで、綺麗なグラスを描きたい
+  * より良い報酬モデルを考えたい
+  * より、リアルに近い実装を心がけたい
+
+## ファイル構成
+drone-genesis-project/
+├── wind_hover_env.py   # 環境定義(公式HoverEnv + OU過程の風 + 拡張報酬)
+├── train.py             # 学習スクリプト(公式hover_train.pyベース)
+├── eval.py               # 評価スクリプト(公式hover_eval.pyベース)
+├── pyproject.toml       # uv用の依存関係定義
+└── README.md
+
 
 ## ベースのコード
 * [Genesis world公式 ](https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/examples/drone/hover_train.py)
