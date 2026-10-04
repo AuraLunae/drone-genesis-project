@@ -133,6 +133,9 @@ def get_cfgs():
         "strength_range": [0.02, 0.08],   # [N]
         "theta_range": [0.5, 2.0],         # 収束速度
         "sigma_range": [0.02, 0.08],       # 乱れの強さ
+        # OU過程のガウスノイズによる極端な外れ値で物理がNaN発散するのを防ぐため、
+        # 風の大きさ(ノルム)を strength_range上限 × この倍率でクリップする
+        "max_norm_multiplier": 3.0,
     }
     return env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg
 
