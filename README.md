@@ -12,3 +12,4 @@
 
 ## ベースのコード
 * [Genesis world公式 ](https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/examples/drone/hover_train.py)
+* [Qiita WSL2+Ubuntu 24.04でGenesis環境構築～学習までやってみた](https://qiita.com/t_tanno/items/a17f0717d136a4f96da0)
