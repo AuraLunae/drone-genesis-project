@@ -9,3 +9,6 @@
 * 16384並列での学習を成功させようとしている。現在は報酬モデルを「遠さへの継続減点+生存ボーナス+目標到達ボーナス」の構成に拡張したところです。
 * やりたいこと:
   * seaborn で、綺麗なグラスを描きたい
+
+## ベースのコード
+* [Genesis world公式 ](https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/examples/drone/hover_train.py)
