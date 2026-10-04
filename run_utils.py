@@ -18,6 +18,9 @@ import re
 from datetime import datetime
 
 
+_RUN_ID_PATTERN = re.compile(r"^\d{8}_\d{6}(?:_\d+)?$")  # 例: 20261004_211853 または 20261004_211853_1
+
+
 def generate_run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -37,13 +40,18 @@ def new_run_dir(exp_name: str, logs_root: str = "logs") -> str:
 
 
 def find_latest_run_dir(exp_name: str, logs_root: str = "logs") -> str:
-    """logs/{exp_name}/ 配下で、最も新しい(名前順で最大の) run_id ディレクトリを返す"""
+    """logs/{exp_name}/ 配下で、最も新しい(名前順で最大の) run_id ディレクトリを返す。
+
+    rsl-rlが自動生成する"git"フォルダ(gitの差分を保存する場所)など、
+    タイムスタンプ形式("YYYYMMDD_HHMMSS")に一致しないディレクトリは
+    ランとして扱わず無視する。"""
     base = os.path.join(logs_root, exp_name)
     candidates = sorted(
-        d for d in glob.glob(os.path.join(base, "*")) if os.path.isdir(d)
+        d for d in glob.glob(os.path.join(base, "*"))
+        if os.path.isdir(d) and _RUN_ID_PATTERN.match(os.path.basename(d))
     )
     if not candidates:
-        raise FileNotFoundError(f"'{base}' の下に学習済みのランが見つかりません。")
+        raise FileNotFoundError(f"'{base}' の下に学習済みのラン(タイムスタンプ形式のフォルダ)が見つかりません。")
     return candidates[-1]
 
 
