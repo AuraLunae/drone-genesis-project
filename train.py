@@ -16,8 +16,6 @@ WindHoverEnv の学習スクリプト。
 import argparse
 import os
 import pickle
-import signal
-import sys
 from importlib import metadata
 
 try:
@@ -67,10 +65,7 @@ def get_train_cfg(exp_name):
         },
         "obs_groups": {"actor": ["policy"], "critic": ["policy"]},
         "num_steps_per_env": 100,
-        # 中断時に失われる学習量を抑えるため、公式サンプルの100より短い間隔で
-        # 保存する(保存1回あたりのコストは小さいので、頻度を上げても
-        # 学習速度への影響は軽微)。
-        "save_interval": 25,
+        "save_interval": 100,
         "run_name": exp_name,
         "logger": "tensorboard",
     }
@@ -192,25 +187,10 @@ def main():
     if resume_ckpt_path is not None:
         runner.load(resume_ckpt_path)
 
-    # 中断(Ctrl+C)や予期しない例外発生時でも、その時点の重みを緊急保存してから
-    # 終了する。これにより save_interval の定期保存を待たずに済み、
-    # 「途中で終わっても学習が無駄にならない」ようにする。
-    interrupted_path = os.path.join(log_dir, "model_interrupted.pt")
-
-    def _save_on_signal(signum, frame):
-        print(f"\n=== 中断を検知。緊急保存: {interrupted_path} ===")
-        runner.save(interrupted_path)
-        sys.exit(1)
-
-    signal.signal(signal.SIGINT, _save_on_signal)
-    signal.signal(signal.SIGTERM, _save_on_signal)
-
-    try:
-        runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
-    except Exception:
-        print(f"\n=== 例外発生。緊急保存: {interrupted_path} ===")
-        runner.save(interrupted_path)
-        raise
+    # 中断・例外発生時に緊急保存はしない。save_interval で定期保存された
+    # 直近のチェックポイントまでが正式な学習成果とし、それ以降の未保存分は
+    # 破棄する(再開は --resume latest で、最後の定期保存地点から行う)。
+    runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
 
 
 if __name__ == "__main__":

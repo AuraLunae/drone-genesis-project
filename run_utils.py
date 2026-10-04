@@ -5,7 +5,7 @@
     logs/{exp_name}/{run_id}/
         cfgs.pkl           # そのランで使った env_cfg 等一式(再現性・resume時の整合性のため)
         model_{iter}.pt     # rsl-rl が save_interval ごとに保存するチェックポイント
-        model_interrupted.pt  # 中断時に緊急保存されるチェックポイント(あれば最優先で拾う)
+        # 中断・例外時の緊急保存は行わない。save_intervalの定期保存のみを正とする。
 
 run_id はラン開始時刻から生成するタイムスタンプ("YYYYMMDD_HHMMSS")。
 新規学習は必ず新しいrun_idのフォルダに保存されるため、既存のランを
@@ -48,13 +48,8 @@ def find_latest_run_dir(exp_name: str, logs_root: str = "logs") -> str:
 
 
 def find_latest_checkpoint(run_dir: str) -> str:
-    """run_dir内で最もイテレーション番号の大きい model_*.pt を返す。
-    model_interrupted.pt(中断時の緊急保存)がある場合はそちらを優先する
-    (定期保存より新しい可能性が高いため)。"""
-    interrupted = os.path.join(run_dir, "model_interrupted.pt")
-    if os.path.exists(interrupted):
-        return interrupted
-
+    """run_dir内で最もイテレーション番号の大きい model_*.pt を返す
+    (save_intervalごとの定期保存のみが対象。緊急保存は行っていない)。"""
     pattern = re.compile(r"model_(\d+)\.pt$")
     best_iter, best_path = -1, None
     for path in glob.glob(os.path.join(run_dir, "model_*.pt")):
