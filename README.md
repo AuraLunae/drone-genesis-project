@@ -13,12 +13,14 @@
   * より、リアルに近い実装を心がけたい
 
 ## ファイル構成
+‘’’
 drone-genesis-project/
 ├── wind_hover_env.py   # 環境定義(公式HoverEnv + OU過程の風 + 拡張報酬)
 ├── train.py             # 学習スクリプト(公式hover_train.pyベース)
 ├── eval.py               # 評価スクリプト(公式hover_eval.pyベース)
 ├── pyproject.toml       # uv用の依存関係定義
 └── README.md
+‘’’
 
 
 ## ベースのコード
