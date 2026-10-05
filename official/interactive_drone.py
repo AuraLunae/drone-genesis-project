@@ -5,45 +5,119 @@ import numpy as np
 import genesis as gs
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
+# ---------------- 調整用パラメータ ----------------
+HOVER_RPM = 14475.8     # ホバリング用の基準RPM
+MAX_RPM = 25000.0
+
+V_MAX = 1.5             # 水平の目標速度 [m/s]
+Z_RATE = 0.6            # 上昇/下降の速さ [m/s]
+KV = 2.5                # 速度誤差 -> 加速度
+A_MAX = 2.5             # 水平加速度の上限 [m/s^2] (傾き約14度)
+G = 9.81
+
+KP_ATT = 225.0          # 姿勢 P (固有角振動数 約15 rad/s)
+KD_ATT = 21.0           # 姿勢 D
+KP_YAW = 8.0            # ヨーレート P
+YAW_RATE_MAX = 1.5      # [rad/s]
+KP_Z = 6.0
+KD_Z = 4.0
+
+RPM_PER_ANG_ACC = 14.0  # 角加速度[rad/s^2] -> RPM差 (cf2x想定の概算)
+RPM_PER_YAW_ACC = 24.0
+RPM_PER_ACC_Z = 740.0   # 上下加速度[m/s^2] -> RPM差 (概算)
+MAX_ATT_DELTA = 1500.0
+YAW_SIGN = 1.0          # ヨーが暴走して回り続ける場合は -1.0 にする
+
+# プロペラ配置の予備値 (自動取得に失敗した場合に使用)
+FALLBACK_PROP_XY = np.array([[0.028, -0.028], [-0.028, -0.028], [0.028, 0.028], [-0.028, 0.028]])
+FALLBACK_SPIN = np.array([1.0, -1.0, -1.0, 1.0])
+
+
+def to_np(x):
+    if hasattr(x, "detach"):
+        x = x.detach().cpu().numpy()
+    return np.asarray(x, dtype=float).reshape(-1)
+
+
+def quat_to_rot(q):
+    w, x, y, z = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
+def get_prop_layout(drone):
+    """プロペラの位置(機体座標)と回転方向を取得。失敗したら予備値を使う"""
+    try:
+        center = to_np(drone.get_pos())
+        xy = np.array([to_np(link.get_pos())[:2] - center[:2] for link in drone.propellers_link])
+        spin = np.array([float(s) for s in drone.propellers_spin])
+        if xy.shape == (4, 2) and spin.shape == (4,):
+            return xy, spin
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] プロペラ配置の自動取得に失敗、予備値を使用: {e}")
+    return FALLBACK_PROP_XY, FALLBACK_SPIN
+
 
 class DroneController:
-    def __init__(self):
-        self.thrust = 14475.8  # Base RPM for constant hover
-        self.rotation_delta = 100.0  # Differential RPM for rotation
-        self.thrust_delta = 10.0  # Amount to change thrust by when accelerating/decelerating
-        self.cur_dir = np.array([0.0, 0.0, 0.0, 0.0])  # rotor directions
+    def __init__(self, prop_xy, spin, z0):
+        self.sx = np.sign(prop_xy[:, 1])  # +y側のプロペラは +1
+        self.sy = np.sign(prop_xy[:, 0])  # +x側のプロペラは +1
+        self.spin = spin
+        self.z_target = z0
+        self.keys = {k: False for k in ("up", "down", "left", "right", "climb", "descend", "yaw_l", "yaw_r")}
 
-    def update_rpms(self):
-        """Compute RPMs based on current direction and thrust"""
-        clipped_dir = np.clip(self.cur_dir, -1.0, 1.0)
-        rpms = self.thrust + clipped_dir * self.rotation_delta
-        return np.clip(rpms, 0, 25000)
+    def set_key(self, name: str, pressed: bool):
+        """押している間は毎フレーム呼ばれても、離したら確実に解除される"""
+        self.keys[name] = pressed
 
-    def add_direction(self, direction: np.ndarray):
-        """Add direction vector (on key press)"""
-        self.cur_dir += direction
+    def compute_rpms(self, pos, quat, vel, ang, dt):
+        k = self.keys
+        R = quat_to_rot(quat)
+        roll = np.arctan2(R[2, 1], R[2, 2])
+        pitch = np.arcsin(np.clip(-R[2, 0], -1.0, 1.0))
+        yaw = np.arctan2(R[1, 0], R[0, 0])
+        w_body = R.T @ ang
 
-    def accelerate(self):
-        """Increase base thrust"""
-        self.thrust = min(self.thrust + self.thrust_delta, 25000)
+        # --- 高度 ---
+        self.z_target += (float(k["climb"]) - float(k["descend"])) * Z_RATE * dt
+        self.z_target = max(self.z_target, 0.1)
+        acc_z = np.clip(KP_Z * (self.z_target - pos[2]) - KD_Z * vel[2], -6.0, 6.0)
+        base = HOVER_RPM + RPM_PER_ACC_Z * acc_z
+        base /= np.sqrt(max(R[2, 2], 0.5))  # 傾いた分の揚力低下を補正
 
-    def decelerate(self):
-        """Decrease base thrust"""
-        self.thrust = max(self.thrust - self.thrust_delta, 0)
+        # --- 水平速度 (ワールド座標: 上=+y, 右=+x) ---
+        v_t = np.array([float(k["right"]) - float(k["left"]), float(k["up"]) - float(k["down"])]) * V_MAX
+        a_w = np.clip(KV * (v_t - vel[:2]), -A_MAX, A_MAX)
+        c, s = np.cos(yaw), np.sin(yaw)
+        a_b = np.array([c * a_w[0] + s * a_w[1], -s * a_w[0] + c * a_w[1]])  # 機体のヨー座標系へ
+        pitch_t = np.clip(a_b[0] / G, -0.3, 0.3)
+        roll_t = np.clip(-a_b[1] / G, -0.3, 0.3)
+
+        # --- 姿勢 PD ---
+        alpha_x = KP_ATT * (roll_t - roll) - KD_ATT * w_body[0]
+        alpha_y = KP_ATT * (pitch_t - pitch) - KD_ATT * w_body[1]
+        yaw_rate_t = (float(k["yaw_l"]) - float(k["yaw_r"])) * YAW_RATE_MAX
+        alpha_z = KP_YAW * (yaw_rate_t - w_body[2])
+
+        ux = np.clip(alpha_x * RPM_PER_ANG_ACC, -MAX_ATT_DELTA, MAX_ATT_DELTA)
+        uy = np.clip(alpha_y * RPM_PER_ANG_ACC, -MAX_ATT_DELTA, MAX_ATT_DELTA)
+        uz = np.clip(alpha_z * RPM_PER_YAW_ACC, -MAX_ATT_DELTA, MAX_ATT_DELTA)
+
+        rpms = base + self.sx * ux - self.sy * uy + self.spin * YAW_SIGN * uz
+        return np.clip(rpms, 0.0, MAX_RPM)
 
 
 def main():
-    # Initialize Genesis
     gs.init(backend=gs.cpu)
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=0.01,
-            gravity=(0, 0, -9.81),
-        ),
-        vis_options=gs.options.VisOptions(
-            show_world_frame=False,
-        ),
+        sim_options=gs.options.SimOptions(dt=0.01, gravity=(0, 0, -9.81)),
+        vis_options=gs.options.VisOptions(show_world_frame=False),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -2.0, 1.0),
             camera_lookat=(0.0, 0.0, 0.3),
@@ -53,41 +127,22 @@ def main():
         show_FPS=False,
     )
 
-    # Add entities
     scene.add_entity(gs.morphs.Plane())
+    start_z = 0.5
     drone = scene.add_entity(
-        morph=gs.morphs.Drone(
-            file="urdf/drones/cf2x.urdf",
-            pos=(0.0, 0, 0.5),  # Start a bit higher
-        ),
+        morph=gs.morphs.Drone(file="urdf/drones/cf2x.urdf", pos=(0.0, 0.0, start_z)),
     )
-
     scene.viewer.follow_entity(drone)
-
-    # Initialize controller
-    controller = DroneController()
 
     scene.build()
 
-    # Register keybindings
-    def direction_keybinds(name: str, key: Key, direction: tuple[float, float, float, float]):
-        """Helper to create press/release keybinds for a direction"""
-        dir_arr = np.array(direction)
+    prop_xy, spin = get_prop_layout(drone)
+    controller = DroneController(prop_xy, spin, start_z)
+
+    def key_binds(name: str, key: Key):
         return [
-            Keybind(
-                name=f"{name}_hold",
-                key=key,
-                key_action=KeyAction.HOLD,
-                callback=controller.add_direction,
-                args=(dir_arr,),
-            ),
-            Keybind(
-                name=f"{name}_release",
-                key=key,
-                key_action=KeyAction.RELEASE,
-                callback=controller.add_direction,
-                args=(-dir_arr,),
-            ),
+            Keybind(f"{name}_hold", key, KeyAction.HOLD, callback=controller.set_key, args=(name, True)),
+            Keybind(f"{name}_release", key, KeyAction.RELEASE, callback=controller.set_key, args=(name, False)),
         ]
 
     is_running = True
@@ -97,32 +152,35 @@ def main():
         is_running = False
 
     scene.viewer.register_keybinds(
-        *direction_keybinds("move_forward", Key.UP, (1.0, 1.0, -1.0, -1.0)),
-        *direction_keybinds("move_backward", Key.DOWN, (-1.0, -1.0, 1.0, 1.0)),
-        *direction_keybinds("move_left", Key.LEFT, (-1.0, 1.0, -1.0, 1.0)),
-        *direction_keybinds("move_right", Key.RIGHT, (1.0, -1.0, 1.0, -1.0)),
-        Keybind("accelerate", Key.SPACE, KeyAction.HOLD, callback=controller.accelerate),
-        Keybind("decelerate", Key.LSHIFT, KeyAction.HOLD, callback=controller.decelerate),
+        *key_binds("up", Key.UP),
+        *key_binds("down", Key.DOWN),
+        *key_binds("left", Key.LEFT),
+        *key_binds("right", Key.RIGHT),
+        *key_binds("climb", Key.SPACE),
+        *key_binds("descend", Key.LSHIFT),
+        *key_binds("yaw_l", Key.Q),
+        *key_binds("yaw_r", Key.E),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
     )
 
-    # Print control instructions
     print("\nDrone Controls:")
-    print("Up - Move Forward (North)")
-    print("Down - Move Backward (South)")
-    print("Left - Move Left (West)")
-    print("Right - Move Right (East)")
-    print("space - Increase RPM")
-    print("shift - Decrease RPM")
+    print("Up / Down     - 前進(+y) / 後退(-y)")
+    print("Left / Right  - 左(-x) / 右(+x)")
+    print("Space / Shift - 上昇 / 下降")
+    print("Q / E         - 左旋回 / 右旋回")
+    print("Esc           - 終了")
 
-    # Run simulation
+    dt = 0.01
     try:
         while is_running:
-            # Update and apply RPMs based on current direction
-            rpms = controller.update_rpms()
+            rpms = controller.compute_rpms(
+                to_np(drone.get_pos()),
+                to_np(drone.get_quat()),
+                to_np(drone.get_vel()),
+                to_np(drone.get_ang()),
+                dt,
+            )
             drone.set_propellers_rpm(rpms)
-
-            # Step simulation
             scene.step()
 
             if "PYTEST_VERSION" in os.environ:
