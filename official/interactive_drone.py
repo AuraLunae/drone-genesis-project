@@ -27,6 +27,7 @@ RPM_PER_ACC_Z = 740.0   # 上下加速度 -> RPM差
 MAX_ATT_DELTA = 1500.0
 YAW_SIGN = 1.0          # ヨーが暴走する場合は -1.0 に変更
 
+# cf2x 用のプロペラ配置固定値
 FALLBACK_PROP_XY = np.array([[0.028, -0.028], [-0.028, -0.028], [0.028, 0.028], [-0.028, 0.028]])
 FALLBACK_SPIN = np.array([1.0, -1.0, -1.0, 1.0])
 
@@ -49,14 +50,7 @@ def quat_to_rot(q):
 
 
 def get_prop_layout(drone):
-    try:
-        center = to_np(drone.get_pos())
-        xy = np.array([to_np(link.get_pos())[:2] - center[:2] for link in drone.propellers_link])
-        spin = np.array([float(s) for s in drone.propellers_spin])
-        if xy.shape == (4, 2) and spin.shape == (4,):
-            return xy, spin
-    except Exception as e:
-        print(f"[warn] プロペラ配置の自動取得に失敗、予備値を使用: {e}")
+    """プロペラ配置を取得（cf2xの場合は予備値を直接使用）"""
     return FALLBACK_PROP_XY, FALLBACK_SPIN
 
 
@@ -78,31 +72,26 @@ class DroneController:
         k = self.keys
         R = quat_to_rot(quat)
 
-        # Z-Y-X オイラー角
         roll = np.arctan2(R[2, 1], R[2, 2])
         pitch = np.arcsin(np.clip(-R[2, 0], -1.0, 1.0))
         yaw = np.arctan2(R[1, 0], R[0, 0])
         w_body = R.T @ ang
 
-        # --- 1. 高度制御 & スタック防止 ---
-        # 下降時も実高度から離れすぎないようにアンチワインドアップ設定
+        # --- 1. 高度制御 & アンチワインドアップ ---
         min_z_target = max(0.03, pos[2] - 0.1)
         self.z_target += (float(k["climb"]) - float(k["descend"])) * Z_RATE * dt
         self.z_target = max(self.z_target, min_z_target)
 
-        # 上昇キーを押したら目標高度を即座に現在地まで復帰
         if k["climb"] and self.z_target < pos[2]:
             self.z_target = pos[2] + 0.05
 
         acc_z = np.clip(KP_Z * (self.z_target - pos[2]) - KD_Z * vel[2], -6.0, 6.0)
         base = HOVER_RPM + RPM_PER_ACC_Z * acc_z
 
-        # 傾き補正 (転倒時の計算暴走を防ぐため下限を設定)
         tilt_factor = np.sqrt(max(R[2, 2], 0.3))
         base /= tilt_factor
 
         # --- 2. 水平速度 & 姿勢制御 ---
-        # ワールド座標: +x = 右, +y = 前
         v_t = np.array([
             float(k["right"]) - float(k["left"]),
             float(k["up"]) - float(k["down"])
@@ -110,19 +99,15 @@ class DroneController:
 
         a_w = np.clip(KV * (v_t - vel[:2]), -A_MAX, A_MAX)
 
-        # ワールド加速度 -> 機体座標系加速度 (+x:前, +y:左)
         c, s = np.cos(yaw), np.sin(yaw)
         a_b_x = c * a_w[0] + s * a_w[1]   # 前進加速度
         a_b_y = -s * a_w[0] + c * a_w[1]  # 左移動加速度
 
-        # 地面付近 (0.08m以下) では水平加速命令をキャンセルして着地姿勢を安定化
         if pos[2] < 0.08:
             pitch_t = 0.0
             roll_t = 0.0
         else:
-            # 前進(a_b_x > 0) -> ピッチダウン (pitch < 0)
             pitch_t = np.clip(-a_b_x / G, -0.3, 0.3)
-            # 左移動(a_b_y > 0) -> 左ロール (roll > 0)
             roll_t = np.clip(a_b_y / G, -0.3, 0.3)
 
         # --- 3. 姿勢 PD 制御 ---
@@ -136,9 +121,6 @@ class DroneController:
         uy = np.clip(alpha_y * RPM_PER_ANG_ACC, -MAX_ATT_DELTA, MAX_ATT_DELTA)
         uz = np.clip(alpha_z * RPM_PER_YAW_ACC, -MAX_ATT_DELTA, MAX_ATT_DELTA)
 
-        # モーター出力への分配 (+x:前, +y:左)
-        # sx (+y側:左) のRPMを上げると右傾 (roll > 0)
-        # sy (+x側:前) のRPMを上げると後傾 (pitch > 0)
         rpms = base + self.sx * ux + self.sy * uy + self.spin * YAW_SIGN * uz
         return np.clip(rpms, 0.0, MAX_RPM)
 
@@ -189,7 +171,7 @@ def main():
         nonlocal is_running
         is_running = False
 
-    # 矢印キーに加えて WASD キーでも操作可能に設定
+    # overwrite=True を指定してデフォルトのキー割り当てを上書き
     scene.viewer.register_keybinds(
         *key_binds("up", "UP", "W"),
         *key_binds("down", "DOWN", "S"),
@@ -200,6 +182,7 @@ def main():
         *key_binds("yaw_l", "Q"),
         *key_binds("yaw_r", "E"),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
+        overwrite=True,  # 👈 ここで既存のバインドを上書き
     )
 
     print("\nDrone Controls:")
