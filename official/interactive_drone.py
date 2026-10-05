@@ -1,5 +1,4 @@
 import os
-
 import numpy as np
 
 import genesis as gs
@@ -12,23 +11,22 @@ MAX_RPM = 25000.0
 V_MAX = 1.5             # 水平の目標速度 [m/s]
 Z_RATE = 0.6            # 上昇/下降の速さ [m/s]
 KV = 2.5                # 速度誤差 -> 加速度
-A_MAX = 2.5             # 水平加速度の上限 [m/s^2] (傾き約14度)
+A_MAX = 2.5             # 水平加速度の上限 [m/s^2]
 G = 9.81
 
-KP_ATT = 225.0          # 姿勢 P (固有角振動数 約15 rad/s)
+KP_ATT = 225.0          # 姿勢 P
 KD_ATT = 21.0           # 姿勢 D
 KP_YAW = 8.0            # ヨーレート P
 YAW_RATE_MAX = 1.5      # [rad/s]
 KP_Z = 6.0
 KD_Z = 4.0
 
-RPM_PER_ANG_ACC = 14.0  # 角加速度[rad/s^2] -> RPM差 (cf2x想定の概算)
+RPM_PER_ANG_ACC = 14.0  # 角加速度 -> RPM差
 RPM_PER_YAW_ACC = 24.0
-RPM_PER_ACC_Z = 740.0   # 上下加速度[m/s^2] -> RPM差 (概算)
+RPM_PER_ACC_Z = 740.0   # 上下加速度 -> RPM差
 MAX_ATT_DELTA = 1500.0
-YAW_SIGN = 1.0          # ヨーが暴走して回り続ける場合は -1.0 にする
+YAW_SIGN = 1.0          # ヨーが暴走する場合は -1.0 に変更
 
-# プロペラ配置の予備値 (自動取得に失敗した場合に使用)
 FALLBACK_PROP_XY = np.array([[0.028, -0.028], [-0.028, -0.028], [0.028, 0.028], [-0.028, 0.028]])
 FALLBACK_SPIN = np.array([1.0, -1.0, -1.0, 1.0])
 
@@ -51,22 +49,22 @@ def quat_to_rot(q):
 
 
 def get_prop_layout(drone):
-    """プロペラの位置(機体座標)と回転方向を取得。失敗したら予備値を使う"""
     try:
         center = to_np(drone.get_pos())
         xy = np.array([to_np(link.get_pos())[:2] - center[:2] for link in drone.propellers_link])
         spin = np.array([float(s) for s in drone.propellers_spin])
         if xy.shape == (4, 2) and spin.shape == (4,):
             return xy, spin
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"[warn] プロペラ配置の自動取得に失敗、予備値を使用: {e}")
     return FALLBACK_PROP_XY, FALLBACK_SPIN
 
 
 class DroneController:
     def __init__(self, prop_xy, spin, z0):
-        self.sx = np.sign(prop_xy[:, 1])  # +y側のプロペラは +1
-        self.sy = np.sign(prop_xy[:, 0])  # +x側のプロペラは +1
+        # 機体座標系: +x=前, +y=左
+        self.sx = np.sign(prop_xy[:, 1])  # +y側 (左側) のプロペラ: +1
+        self.sy = np.sign(prop_xy[:, 0])  # +x側 (前側) のプロペラ: +1
         self.spin = spin
         self.z_target = z0
         self.keys = {k: False for k in ("up", "down", "left", "right", "climb", "descend", "yaw_l", "yaw_r")}
@@ -79,29 +77,58 @@ class DroneController:
     def compute_rpms(self, pos, quat, vel, ang, dt):
         k = self.keys
         R = quat_to_rot(quat)
+
+        # Z-Y-X オイラー角
         roll = np.arctan2(R[2, 1], R[2, 2])
         pitch = np.arcsin(np.clip(-R[2, 0], -1.0, 1.0))
         yaw = np.arctan2(R[1, 0], R[0, 0])
         w_body = R.T @ ang
 
-        # --- 高度 ---
+        # --- 1. 高度制御 & スタック防止 ---
+        # 下降時も実高度から離れすぎないようにアンチワインドアップ設定
+        min_z_target = max(0.03, pos[2] - 0.1)
         self.z_target += (float(k["climb"]) - float(k["descend"])) * Z_RATE * dt
-        self.z_target = max(self.z_target, 0.1)
+        self.z_target = max(self.z_target, min_z_target)
+
+        # 上昇キーを押したら目標高度を即座に現在地まで復帰
+        if k["climb"] and self.z_target < pos[2]:
+            self.z_target = pos[2] + 0.05
+
         acc_z = np.clip(KP_Z * (self.z_target - pos[2]) - KD_Z * vel[2], -6.0, 6.0)
         base = HOVER_RPM + RPM_PER_ACC_Z * acc_z
-        base /= np.sqrt(max(R[2, 2], 0.5))  # 傾いた分の揚力低下を補正
 
-        # --- 水平速度 (ワールド座標: 上=+y, 右=+x) ---
-        v_t = np.array([float(k["right"]) - float(k["left"]), float(k["up"]) - float(k["down"])]) * V_MAX
+        # 傾き補正 (転倒時の計算暴走を防ぐため下限を設定)
+        tilt_factor = np.sqrt(max(R[2, 2], 0.3))
+        base /= tilt_factor
+
+        # --- 2. 水平速度 & 姿勢制御 ---
+        # ワールド座標: +x = 右, +y = 前
+        v_t = np.array([
+            float(k["right"]) - float(k["left"]),
+            float(k["up"]) - float(k["down"])
+        ]) * V_MAX
+
         a_w = np.clip(KV * (v_t - vel[:2]), -A_MAX, A_MAX)
-        c, s = np.cos(yaw), np.sin(yaw)
-        a_b = np.array([c * a_w[0] + s * a_w[1], -s * a_w[0] + c * a_w[1]])  # 機体のヨー座標系へ
-        pitch_t = np.clip(a_b[0] / G, -0.3, 0.3)
-        roll_t = np.clip(-a_b[1] / G, -0.3, 0.3)
 
-        # --- 姿勢 PD ---
+        # ワールド加速度 -> 機体座標系加速度 (+x:前, +y:左)
+        c, s = np.cos(yaw), np.sin(yaw)
+        a_b_x = c * a_w[0] + s * a_w[1]   # 前進加速度
+        a_b_y = -s * a_w[0] + c * a_w[1]  # 左移動加速度
+
+        # 地面付近 (0.08m以下) では水平加速命令をキャンセルして着地姿勢を安定化
+        if pos[2] < 0.08:
+            pitch_t = 0.0
+            roll_t = 0.0
+        else:
+            # 前進(a_b_x > 0) -> ピッチダウン (pitch < 0)
+            pitch_t = np.clip(-a_b_x / G, -0.3, 0.3)
+            # 左移動(a_b_y > 0) -> 左ロール (roll > 0)
+            roll_t = np.clip(a_b_y / G, -0.3, 0.3)
+
+        # --- 3. 姿勢 PD 制御 ---
         alpha_x = KP_ATT * (roll_t - roll) - KD_ATT * w_body[0]
         alpha_y = KP_ATT * (pitch_t - pitch) - KD_ATT * w_body[1]
+
         yaw_rate_t = (float(k["yaw_l"]) - float(k["yaw_r"])) * YAW_RATE_MAX
         alpha_z = KP_YAW * (yaw_rate_t - w_body[2])
 
@@ -109,7 +136,10 @@ class DroneController:
         uy = np.clip(alpha_y * RPM_PER_ANG_ACC, -MAX_ATT_DELTA, MAX_ATT_DELTA)
         uz = np.clip(alpha_z * RPM_PER_YAW_ACC, -MAX_ATT_DELTA, MAX_ATT_DELTA)
 
-        rpms = base + self.sx * ux - self.sy * uy + self.spin * YAW_SIGN * uz
+        # モーター出力への分配 (+x:前, +y:左)
+        # sx (+y側:左) のRPMを上げると右傾 (roll > 0)
+        # sy (+x側:前) のRPMを上げると後傾 (pitch > 0)
+        rpms = base + self.sx * ux + self.sy * uy + self.spin * YAW_SIGN * uz
         return np.clip(rpms, 0.0, MAX_RPM)
 
 
@@ -159,11 +189,12 @@ def main():
         nonlocal is_running
         is_running = False
 
+    # 矢印キーに加えて WASD キーでも操作可能に設定
     scene.viewer.register_keybinds(
-        *key_binds("up", "UP"),
-        *key_binds("down", "DOWN"),
-        *key_binds("left", "LEFT"),
-        *key_binds("right", "RIGHT"),
+        *key_binds("up", "UP", "W"),
+        *key_binds("down", "DOWN", "S"),
+        *key_binds("left", "LEFT", "A"),
+        *key_binds("right", "RIGHT", "D"),
         *key_binds("climb", "SPACE", "PAGEUP"),
         *key_binds("descend", "LSHIFT", "RSHIFT", "PAGEDOWN"),
         *key_binds("yaw_l", "Q"),
@@ -172,11 +203,11 @@ def main():
     )
 
     print("\nDrone Controls:")
-    print("Up / Down     - 前進(+y) / 後退(-y)")
-    print("Left / Right  - 左(-x) / 右(+x)")
-    print("Space / Shift - 上昇 / 下降")
-    print("Q / E         - 左旋回 / 右旋回")
-    print("Esc           - 終了")
+    print("W / S / Up / Down      - 前進 / 後退")
+    print("A / D / Left / Right   - 左移動 / 右移動")
+    print("Space / Shift          - 上昇 / 下降")
+    print("Q / E                  - 左旋回 / 右旋回")
+    print("Esc                    - 終了")
 
     dt = 0.01
     try:
