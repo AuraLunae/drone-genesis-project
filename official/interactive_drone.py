@@ -87,18 +87,18 @@ class DroneController:
         base /= tilt_factor
 
         # --- 2. 水平速度 & 姿勢目標の計算 ---
-        # ワールド目標速度 (+x_w: 右, +y_w: 前)
-        v_w_x = (float(k["right"]) - float(k["left"])) * V_MAX
-        v_w_y = (float(k["up"]) - float(k["down"])) * V_MAX
+        # ワールド目標速度 (+x_w: 前, +y_w: 左)
+        v_w_x = (float(k["up"]) - float(k["down"])) * V_MAX
+        v_w_y = (float(k["left"]) - float(k["right"])) * V_MAX
 
         # ワールド目標加速度
         a_w_x = np.clip(KV * (v_w_x - vel[0]), -A_MAX, A_MAX)
         a_w_y = np.clip(KV * (v_w_y - vel[1]), -A_MAX, A_MAX)
 
         # ワールド加速度 -> 機体座標系加速度 (+x_b: 前, +y_b: 左)
-        s, c = np.sin(yaw), np.cos(yaw)
-        a_b_x = -a_w_x * s + a_w_y * c   # 機体前方向の加速度
-        a_b_y = -a_w_x * c - a_w_y * s   # 機体左方向の加速度
+        c, s = np.cos(yaw), np.sin(yaw)
+        a_b_x = a_w_x * c + a_w_y * s   # 機体前方向の加速度
+        a_b_y = -a_w_x * s + a_w_y * c  # 機体左方向の加速度
 
         if pos[2] < 0.08:
             pitch_t = 0.0
@@ -106,7 +106,7 @@ class DroneController:
         else:
             # 前進 (a_b_x > 0) -> 機首を下げる (pitch_t < 0)
             pitch_t = np.clip(-a_b_x / G, -0.3, 0.3)
-            # 右移動 (a_b_y < 0) -> 右に傾ける (roll_t > 0)
+            # 左移動 (a_b_y > 0) -> 左に傾ける (roll_t < 0)
             roll_t = np.clip(-a_b_y / G, -0.3, 0.3)
 
         # --- 3. 姿勢 PD 制御 ---
@@ -131,7 +131,7 @@ def main():
         sim_options=gs.options.SimOptions(dt=0.01, gravity=(0, 0, -9.81)),
         vis_options=gs.options.VisOptions(show_world_frame=False),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -2.0, 1.0),
+            camera_pos=(-2.0, 0.0, 1.0),
             camera_lookat=(0.0, 0.0, 0.3),
             camera_fov=45,
         ),
@@ -157,7 +157,7 @@ def main():
             if key is None:
                 continue
             binds += [
-                Keybind(f"{name}_{kn}_hold", key, KeyAction.HOLD, callback=controller.set_key, args=(name, True)),
+                Keybind(f"{name}_{kn}_press", key, KeyAction.PRESS, callback=controller.set_key, args=(name, True)),
                 Keybind(f"{name}_{kn}_release", key, KeyAction.RELEASE, callback=controller.set_key, args=(name, False)),
             ]
         return binds
