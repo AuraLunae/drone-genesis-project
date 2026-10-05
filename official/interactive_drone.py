@@ -25,7 +25,7 @@ RPM_PER_ANG_ACC = 14.0  # 角加速度 -> RPM差
 RPM_PER_YAW_ACC = 24.0
 RPM_PER_ACC_Z = 740.0   # 上下加速度 -> RPM差
 MAX_ATT_DELTA = 1500.0
-YAW_SIGN = 1.0          # ヨーが暴走する場合は -1.0 に変更
+YAW_SIGN = -1.0         # CF2X のプロペラ回転方向とトルクの符号が逆なので反転
 
 # cf2x 用のプロペラ配置固定値 (+x:前, +y:左)
 FALLBACK_PROP_XY = np.array([[0.028, -0.028], [-0.028, -0.028], [0.028, 0.028], [-0.028, 0.028]])
@@ -104,10 +104,10 @@ class DroneController:
             pitch_t = 0.0
             roll_t = 0.0
         else:
-            # 前進 (a_b_x > 0) -> 機首を下げる (pitch_t < 0)
-            pitch_t = np.clip(-a_b_x / G, -0.3, 0.3)
-            # 左移動 (a_b_y > 0) -> 左に傾ける (roll_t < 0)
-            roll_t = np.clip(-a_b_y / G, -0.3, 0.3)
+            # 入力方向に対して機体を傾け、そこへ加速させる
+            # +x: 前, +y: 左 のボディ座標で、押した方向の加速度と同じ符号で目標姿勢を作る
+            pitch_t = np.clip(a_b_x / G, -0.3, 0.3)
+            roll_t = np.clip(a_b_y / G, -0.3, 0.3)
 
         # --- 3. 姿勢 PD 制御 ---
         alpha_x = KP_ATT * (roll_t - roll) - KD_ATT * w_body[0]
