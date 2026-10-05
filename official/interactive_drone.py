@@ -72,7 +72,8 @@ class DroneController:
         self.keys = {k: False for k in ("up", "down", "left", "right", "climb", "descend", "yaw_l", "yaw_r")}
 
     def set_key(self, name: str, pressed: bool):
-        """押している間は毎フレーム呼ばれても、離したら確実に解除される"""
+        if self.keys[name] != pressed:
+            print(f"[key] {name}: {'ON' if pressed else 'OFF'}")
         self.keys[name] = pressed
 
     def compute_rpms(self, pos, quat, vel, ang, dt):
@@ -139,11 +140,18 @@ def main():
     prop_xy, spin = get_prop_layout(drone)
     controller = DroneController(prop_xy, spin, start_z)
 
-    def key_binds(name: str, key: Key):
-        return [
-            Keybind(f"{name}_hold", key, KeyAction.HOLD, callback=controller.set_key, args=(name, True)),
-            Keybind(f"{name}_release", key, KeyAction.RELEASE, callback=controller.set_key, args=(name, False)),
-        ]
+    def key_binds(name: str, *key_names: str):
+        binds = []
+        for kn in key_names:
+            key = getattr(Key, kn, None)
+            if key is None:
+                print(f"[warn] Key.{kn} は存在しないので無視します")
+                continue
+            binds += [
+                Keybind(f"{name}_{kn}_hold", key, KeyAction.HOLD, callback=controller.set_key, args=(name, True)),
+                Keybind(f"{name}_{kn}_release", key, KeyAction.RELEASE, callback=controller.set_key, args=(name, False)),
+            ]
+        return binds
 
     is_running = True
 
@@ -152,14 +160,14 @@ def main():
         is_running = False
 
     scene.viewer.register_keybinds(
-        *key_binds("up", Key.UP),
-        *key_binds("down", Key.DOWN),
-        *key_binds("left", Key.LEFT),
-        *key_binds("right", Key.RIGHT),
-        *key_binds("climb", Key.SPACE),
-        *key_binds("descend", Key.LSHIFT),
-        *key_binds("yaw_l", Key.Q),
-        *key_binds("yaw_r", Key.E),
+        *key_binds("up", "UP"),
+        *key_binds("down", "DOWN"),
+        *key_binds("left", "LEFT"),
+        *key_binds("right", "RIGHT"),
+        *key_binds("climb", "SPACE", "PAGEUP"),
+        *key_binds("descend", "LSHIFT", "RSHIFT", "PAGEDOWN"),
+        *key_binds("yaw_l", "Q"),
+        *key_binds("yaw_r", "E"),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
     )
 
