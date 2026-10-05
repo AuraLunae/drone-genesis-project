@@ -175,12 +175,26 @@ class WindHoverEnv:
         self.wind_vec[envs_idx] = 0.0
 
     def _update_and_apply_wind(self):
-        """OU過程で風を更新し、ドローンのCOMリンクへ外力として加える"""
+        """OU過程で風を更新し、ドローンのCOMリンクへ外力として加える。
+
+        注: OU過程はガウスノイズを含むため理論上は無限大の値も取り得る。
+        8192並列×毎ステップでガウス乱数を引き続けると、試行回数が膨大なため
+        「滅多に起きない極端な外れ値」がいつかは必ず発生し、軽量な機体(約34g)に
+        一瞬で過大な力が加わって物理シミュレーションがNaNで発散する原因になり得る。
+        これを防ぐため、風の大きさ(ノルム)を strength_range の上限の数倍で
+        クリップする(方向は変えず大きさだけ制限する)。
+        """
         noise = torch.randn((self.num_envs, 3), device=gs.device)
         self.wind_vec += (
             self.wind_theta.unsqueeze(1) * (self.wind_mean - self.wind_vec) * self.dt
             + self.wind_sigma.unsqueeze(1) * math.sqrt(self.dt) * noise
         )
+
+        max_wind_norm = self.wind_cfg["strength_range"][1] * self.wind_cfg.get("max_norm_multiplier", 3.0)
+        wind_norm = torch.norm(self.wind_vec, dim=1, keepdim=True)
+        clip_scale = torch.clamp(max_wind_norm / (wind_norm + 1e-8), max=1.0)
+        self.wind_vec = self.wind_vec * clip_scale
+
         self.rigid_solver.apply_links_external_force(
             self.wind_vec.unsqueeze(1),  # (num_envs, 3) -> (num_envs, 1, 3): 対象リンクが1つのため
             links_idx=[self.com_link_idx],
@@ -345,7 +359,17 @@ class WindHoverEnv:
         return torch.exp(self.reward_cfg["yaw_lambda"] * torch.abs(yaw))
 
     def _reward_angular(self):
-        return torch.norm(self.base_ang_vel / 3.14159, dim=1)
+        """角速度の安定性報酬。rsl-rl系(legged_gym)の標準設計に合わせ、
+        生のノルム/二乗和ではなく exp(-k * ||ang_vel||^2) という指数カーネルで
+        [0, 1] に有界化する(0に近いほど悪い、1が最良=静止)。
+
+        理由: 生のノルムだと、何らかの理由で角速度が一瞬跳ね上がった際に
+        この項だけが青天井に悪化し、他の報酬項目(せいぜい0.1〜数程度)を
+        桁違いに圧倒して学習を不安定化させる(実際に rew_angular が -2551
+        まで悪化し、総報酬のほぼ全てを占めてしまう現象が発生した)。
+        指数カーネルなら最悪でも0に漸近するだけなので、この暴走を防げる。"""
+        ang_vel_sq = torch.sum(torch.square(self.base_ang_vel), dim=1)
+        return torch.exp(-self.reward_cfg["angular_penalty_sigma"] * ang_vel_sq)
 
     def _reward_crash(self):
         crash_rew = torch.zeros((self.num_envs,), device=gs.device, dtype=gs.tc_float)

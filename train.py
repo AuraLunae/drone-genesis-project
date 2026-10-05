@@ -106,6 +106,10 @@ def get_cfgs():
         "yaw_lambda": -10.0,
         # distance_penalty(tanh)がこの距離[m]あたりでほぼ頭打ち(-1近く)になる
         "distance_penalty_scale_m": 1.0,
+        # 角速度報酬 exp(-k * ||ang_vel||^2) の k。
+        # ||ang_vel||=π(180°/s、それなりに速い回転)で報酬が約0.37(1/e)まで
+        # 下がる程度に設定。値を大きくするほど、小さな角速度にも厳しくなる。
+        "angular_penalty_sigma": 0.1,
         "reward_scales": {
             "target": 5.0,            # 進歩報酬(差分)。学習を加速させる役割
             "distance_penalty": 1.0,  # 遠いこと自体への継続的減点(tanhで頭打ち)
@@ -113,7 +117,10 @@ def get_cfgs():
             "alive": 0.5,             # 生存ボーナス(墜落以外は毎ステップ加点)
             "smooth": -1e-4,
             "yaw": 0.01,
-            "angular": -2e-4,
+            # 符号が+に変わった点に注意: exp(...)は「低角速度への報酬」
+            # (0,1]なので、正の重みで"加点"として扱う(以前は生ノルムへの
+            # 減点だったため負の重みだった)。
+            "angular": 0.5,
             "crash": -10.0,
         },
     }
