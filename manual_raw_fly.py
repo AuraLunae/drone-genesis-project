@@ -3,14 +3,12 @@ manual_raw_fly.py (完全手動 / 本物の操縦感を追求した版)
 
 実際のドローン操縦機(モード2)に合わせた4軸操作:
 
-    - スロットル(Space/Left Shift): 直接出力。離しても中央に戻らない(実機のスロットル
-    スティックと同じ)。高度は自動では維持されない ― 触らなければ
-    上昇/下降し続ける(Acroモードの実機と同じ、自動ホバリング無し)。
+    - 上下速度(Space/X): 目標の上昇/下降速度を変える。目標を0に戻すと自動で減速する。
     - ヨー(Q/E)   : スティック位置は「回転速度」の指示。離せばその場の
     機首方向をそのまま保持する(絶対角度を指示しているわけではない)。
-  - ロール(←/→) : スティック位置が目標の傾斜角になり、離せば水平に戻る
+    - ロール(↑/↓) : スティック位置が目標の傾斜角になり、離せば水平に戻る
     (セルフレベル=Angleモード。多くの民生ドローンのデフォルト)。
-  - ピッチ(↑/↓) : 同上。
+    - ピッチ(←/→) : 同上。
 
 さらに実機同様の「アーム(武装)」操作を入れている: 起動直後はプロペラは
 回転しておらず、Enterキーでアームするまで飛行できない。
@@ -20,11 +18,11 @@ manual_raw_fly.py (完全手動 / 本物の操縦感を追求した版)
 過去に経験した通り不安定化のリスクがあるため)。
 
 操作方法:
-    Space      : スロットルを上げる(離しても値は保持される)
-    Left Shift : スロットルを下げる(離しても値は保持される)
+    Space      : 上昇速度を上げる(離しても目標速度は保持される)
+    X          : 目標速度を下げる(0で停止、負で下降)
     Q / E      : 左旋回 / 右旋回(ヨー、離すと機首方向を保持)
-  ↑ / ↓      : 前傾 / 後傾(ピッチ、離すと水平に戻る)
-  ← / →      : 左傾 / 右傾(ロール、離すと水平に戻る)
+    ↑ / ↓      : 左傾 / 右傾(ロール、離すと水平に戻る)
+    ← / →      : 後傾 / 前傾(ピッチ、離すと水平に戻る)
   Enter      : アーム / ディスアーム切り替え
   Esc        : 終了
 
@@ -102,14 +100,16 @@ class SingleDroneWind:
 class ManualFlightController:
     MAX_TILT_DEG = 20.0          # ロール/ピッチの最大傾斜角
     YAW_RATE_DEG_S = 90.0        # ヨースティック最大時の回転速度
-    THROTTLE_RATE_RPM_S = 18000.0  # キー操作に対するスロットル応答を確保
-    THROTTLE_MIN_OFFSET = -0.35 * BASE_RPM
-    THROTTLE_MAX_OFFSET = 0.6 * BASE_RPM
+    VERTICAL_SPEED_RATE = 1.0  # m/s^2
+    MAX_VERTICAL_SPEED = 1.5  # m/s
+    VERTICAL_SPEED_KP = 8.0
+    MAX_VERTICAL_ACCEL = 6.0  # m/s^2
+    RPM_PER_VERTICAL_ACCEL = 740.0  # official/interactive_drone.py と同じ
 
     def __init__(self, drone):
         self.drone = drone
-        self._pid_roll = PIDController(10.0, 0.0, 1.0)
-        self._pid_pitch = PIDController(10.0, 0.0, 1.0)
+        self._pid_roll = PIDController(10.0, 0.0, 5.0)
+        self._pid_pitch = PIDController(10.0, 0.0, 5.0)
         self._pid_yaw = PIDController(2.0, 0.0, 0.2)
         self._prev_attitude = None
 
@@ -120,7 +120,7 @@ class ManualFlightController:
         self.throttle_stick = 0.0
 
         self.target_yaw_deg = 0.0      # ヨーは絶対角度を積分で保持(レート制御の結果)
-        self.throttle_offset = 0.0     # スロットルはセルフセンタリングしない
+        self.target_vertical_speed = 0.0
         self.armed = False
 
     # ---- キーコールバック ---- #
@@ -144,7 +144,7 @@ class ManualFlightController:
         self.pitch_stick = 0.0
         self.yaw_stick = 0.0
         self.throttle_stick = 0.0
-        self.throttle_offset = 0.0
+        self.target_vertical_speed = 0.0
         self._pid_roll.reset()
         self._pid_pitch.reset()
         self._pid_yaw.reset()
@@ -177,10 +177,11 @@ class ManualFlightController:
         # ヨー: スティックは回転速度の指示。離せば機首方向を保持する
         self.target_yaw_deg += self.yaw_stick * self.YAW_RATE_DEG_S * dt
 
-        # スロットル: セルフセンタリングしない直接出力(実機のスロットルと同じ)
-        self.throttle_offset += self.throttle_stick * self.THROTTLE_RATE_RPM_S * dt
-        self.throttle_offset = max(
-            self.THROTTLE_MIN_OFFSET, min(self.throttle_offset, self.THROTTLE_MAX_OFFSET)
+        # Space/Xで目標上下速度を変え、目標0では実速度を減衰させる
+        self.target_vertical_speed += self.throttle_stick * self.VERTICAL_SPEED_RATE * dt
+        self.target_vertical_speed = max(
+            -self.MAX_VERTICAL_SPEED,
+            min(self.target_vertical_speed, self.MAX_VERTICAL_SPEED),
         )
 
         # ロール/ピッチ: スティック位置がそのまま目標傾斜角(セルフレベル)
@@ -195,7 +196,10 @@ class ManualFlightController:
         pitch_del = self._pid_pitch.update(err_pitch, dt, measurement_rate=attitude_rate[1])
         yaw_del = self._pid_yaw.update(err_yaw, dt, measurement_rate=attitude_rate[2])
 
-        thrust = self.throttle_offset
+        vertical_velocity = float(self.drone.get_vel()[2])
+        vertical_accel = self.VERTICAL_SPEED_KP * (self.target_vertical_speed - vertical_velocity)
+        vertical_accel = max(-self.MAX_VERTICAL_ACCEL, min(vertical_accel, self.MAX_VERTICAL_ACCEL))
+        thrust = self.RPM_PER_VERTICAL_ACCEL * vertical_accel
         # quadcopter_controller.py のミキサー式と同じパターン(x_vel/y_velは
         # 位置制御の外側ループが無いのでゼロ扱い)
         m1 = BASE_RPM + (thrust - roll_del - pitch_del - yaw_del)
@@ -247,9 +251,8 @@ def main():
         is_running = False
 
     def toggle_arm():
-        if not controller.armed:
-            drone.set_pos(disarmed_pos, zero_velocity=True)
-            drone.set_quat(disarmed_quat, zero_velocity=True)
+        drone.set_pos(disarmed_pos, zero_velocity=True)
+        drone.set_quat(disarmed_quat, zero_velocity=True)
         controller.toggle_arm()
 
     def axis_keybinds(name, key_pos, key_neg, setter):
@@ -262,20 +265,20 @@ def main():
         ]
 
     scene.viewer.register_keybinds(
-        *axis_keybinds("pitch", Key.UP, Key.DOWN, controller.set_pitch),
-        *axis_keybinds("roll", Key.RIGHT, Key.LEFT, controller.set_roll),
+        *axis_keybinds("pitch", Key.RIGHT, Key.LEFT, controller.set_pitch),
+        *axis_keybinds("roll", Key.DOWN, Key.UP, controller.set_roll),
         *axis_keybinds("yaw", Key.E, Key.Q, controller.set_yaw),
-        *axis_keybinds("throttle", Key.SPACE, Key.LSHIFT, controller.set_throttle),
+        *axis_keybinds("throttle", Key.SPACE, Key.X, controller.set_throttle),
         Keybind("arm_toggle", Key.RETURN, KeyAction.RELEASE, callback=toggle_arm),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
     )
 
     print("\n=== 操作方法(完全手動。実機のモード2送信機に準拠) ===")
-    print("Space      : スロットル増加(離しても値を保持)")
-    print("Left Shift : スロットル減少(離しても値を保持)")
+    print("Space      : 上昇速度を上げる(離しても目標速度は保持)")
+    print("X          : 目標速度を下げる(0で停止、負で下降)")
     print("Q / E       : 左旋回 / 右旋回(ヨー)")
-    print("↑ / ↓       : 前傾 / 後傾(ピッチ)")
-    print("← / →       : 左傾 / 右傾(ロール)")
+    print("↑ / ↓       : 左傾 / 右傾(ロール)")
+    print("← / →       : 後傾 / 前傾(ピッチ)")
     print("Enter       : アーム / ディスアーム")
     print("Esc         : 終了")
     print("\n起動直後はディスアーム状態です。Enterキーでアームしてください。")
