@@ -137,7 +137,9 @@ class ManualFlightController:
         self.throttle_stick = v
 
     def toggle_arm(self):
-        self.armed = not self.armed
+        arm = not self.armed
+        if not arm:
+            self.armed = False
         self.roll_stick = 0.0
         self.pitch_stick = 0.0
         self.yaw_stick = 0.0
@@ -146,14 +148,15 @@ class ManualFlightController:
         self._pid_roll.reset()
         self._pid_pitch.reset()
         self._pid_yaw.reset()
-        if self.armed:
+        if arm:
             # スロットルはホバリング相当の基準RPMから開始
             att = quat_to_xyz(self.drone.get_quat(), rpy=True, degrees=True)
             self.target_yaw_deg = float(att[2])  # 現在の機首方向を基準にする
             self._prev_attitude = np.array([float(angle) for angle in att], dtype=np.float64)
+            self.armed = True
         else:
             self._prev_attitude = None
-        print(f"=== {'アーム' if self.armed else 'ディスアーム'} ===")
+        print(f"=== {'アーム' if arm else 'ディスアーム'} ===")
 
     # ---- 毎ステップ呼び出し ---- #
     def update(self, dt):
@@ -162,9 +165,13 @@ class ManualFlightController:
 
         att = quat_to_xyz(self.drone.get_quat(), rpy=True, degrees=True)
         attitude = np.array([float(angle) for angle in att], dtype=np.float64)
-        angle_delta = attitude - self._prev_attitude
-        angle_delta[2] = (angle_delta[2] + 180.0) % 360.0 - 180.0
-        attitude_rate = angle_delta / dt
+        previous_attitude = self._prev_attitude
+        if previous_attitude is None:
+            attitude_rate = np.zeros(3, dtype=np.float64)
+        else:
+            angle_delta = attitude - previous_attitude
+            angle_delta[2] = (angle_delta[2] + 180.0) % 360.0 - 180.0
+            attitude_rate = angle_delta / dt
         self._prev_attitude = attitude
 
         # ヨー: スティックは回転速度の指示。離せば機首方向を保持する
