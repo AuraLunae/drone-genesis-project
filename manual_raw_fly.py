@@ -3,10 +3,10 @@ manual_raw_fly.py (完全手動 / 本物の操縦感を追求した版)
 
 実際のドローン操縦機(モード2)に合わせた4軸操作:
 
-  - スロットル(W/S): 直接出力。離しても中央に戻らない(実機のスロットル
+    - スロットル(Space/Left Shift): 直接出力。離しても中央に戻らない(実機のスロットル
     スティックと同じ)。高度は自動では維持されない ― 触らなければ
     上昇/下降し続ける(Acroモードの実機と同じ、自動ホバリング無し)。
-  - ヨー(A/D)   : スティック位置は「回転速度」の指示。離せばその場の
+    - ヨー(Q/E)   : スティック位置は「回転速度」の指示。離せばその場の
     機首方向をそのまま保持する(絶対角度を指示しているわけではない)。
   - ロール(←/→) : スティック位置が目標の傾斜角になり、離せば水平に戻る
     (セルフレベル=Angleモード。多くの民生ドローンのデフォルト)。
@@ -20,8 +20,9 @@ manual_raw_fly.py (完全手動 / 本物の操縦感を追求した版)
 過去に経験した通り不安定化のリスクがあるため)。
 
 操作方法:
-  W / S      : スロットルを上げる / 下げる(離しても値は保持される)
-  A / D      : 左旋回 / 右旋回(ヨー、離すと機首方向を保持)
+    Space      : スロットルを上げる(離しても値は保持される)
+    Left Shift : スロットルを下げる(離しても値は保持される)
+    Q / E      : 左旋回 / 右旋回(ヨー、離すと機首方向を保持)
   ↑ / ↓      : 前傾 / 後傾(ピッチ、離すと水平に戻る)
   ← / →      : 左傾 / 右傾(ロール、離すと水平に戻る)
   Enter      : アーム / ディスアーム切り替え
@@ -46,6 +47,8 @@ DT = 0.01
 BASE_RPM = 14468.429183500699  # CF2Xのホバリング基準RPM
 MIN_RPM = 0.0
 MAX_RPM = 25000.0  # interactive_drone.py と同じ、モーターの物理的な上限
+PROP_ARM_LENGTH = 0.028  # CF2X URDFのプロペラ腕長[m]
+PROP_KF = 3.16e-10  # CF2X URDFの推力係数[N/RPM^2]
 
 
 # ---------------------------------------------------------------------- #
@@ -57,11 +60,15 @@ class PIDController:
         self.integral = 0.0
         self.prev_error = 0.0
 
-    def update(self, error, dt):
+    def update(self, error, dt, measurement_rate=None):
         self.integral += error * dt
-        derivative = (error - self.prev_error) / dt
+        derivative = (error - self.prev_error) / dt if measurement_rate is None else -measurement_rate
         self.prev_error = error
         return (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_error = 0.0
 
 
 # ---------------------------------------------------------------------- #
@@ -95,7 +102,7 @@ class SingleDroneWind:
 class ManualFlightController:
     MAX_TILT_DEG = 20.0          # ロール/ピッチの最大傾斜角
     YAW_RATE_DEG_S = 90.0        # ヨースティック最大時の回転速度
-    THROTTLE_RATE_RPM_S = 6000.0  # スロットルスティックを倒している間の変化速度
+    THROTTLE_RATE_RPM_S = 18000.0  # キー操作に対するスロットル応答を確保
     THROTTLE_MIN_OFFSET = -0.35 * BASE_RPM
     THROTTLE_MAX_OFFSET = 0.6 * BASE_RPM
 
@@ -104,6 +111,7 @@ class ManualFlightController:
         self._pid_roll = PIDController(10.0, 0.0, 1.0)
         self._pid_pitch = PIDController(10.0, 0.0, 1.0)
         self._pid_yaw = PIDController(2.0, 0.0, 0.2)
+        self._prev_attitude = None
 
         # スティック入力(-1.0 ~ 1.0)。キーのHOLD/RELEASEで更新される
         self.roll_stick = 0.0
@@ -130,14 +138,21 @@ class ManualFlightController:
 
     def toggle_arm(self):
         self.armed = not self.armed
+        self.roll_stick = 0.0
+        self.pitch_stick = 0.0
+        self.yaw_stick = 0.0
+        self.throttle_stick = 0.0
+        self.throttle_offset = 0.0
+        self._pid_roll.reset()
+        self._pid_pitch.reset()
+        self._pid_yaw.reset()
         if self.armed:
-            # アーム時は積分項をリセットし、スロットルはアイドル(0オフセット=ホバリング相当)から開始
-            self._pid_roll.integral = 0.0
-            self._pid_pitch.integral = 0.0
-            self._pid_yaw.integral = 0.0
-            self.throttle_offset = 0.0
+            # スロットルはホバリング相当の基準RPMから開始
             att = quat_to_xyz(self.drone.get_quat(), rpy=True, degrees=True)
             self.target_yaw_deg = float(att[2])  # 現在の機首方向を基準にする
+            self._prev_attitude = np.array([float(angle) for angle in att], dtype=np.float64)
+        else:
+            self._prev_attitude = None
         print(f"=== {'アーム' if self.armed else 'ディスアーム'} ===")
 
     # ---- 毎ステップ呼び出し ---- #
@@ -146,6 +161,11 @@ class ManualFlightController:
             return [0.0, 0.0, 0.0, 0.0]
 
         att = quat_to_xyz(self.drone.get_quat(), rpy=True, degrees=True)
+        attitude = np.array([float(angle) for angle in att], dtype=np.float64)
+        angle_delta = attitude - self._prev_attitude
+        angle_delta[2] = (angle_delta[2] + 180.0) % 360.0 - 180.0
+        attitude_rate = angle_delta / dt
+        self._prev_attitude = attitude
 
         # ヨー: スティックは回転速度の指示。離せば機首方向を保持する
         self.target_yaw_deg += self.yaw_stick * self.YAW_RATE_DEG_S * dt
@@ -164,9 +184,9 @@ class ManualFlightController:
         err_pitch = target_pitch - float(att[1])
         err_yaw = self.target_yaw_deg - float(att[2])
 
-        roll_del = self._pid_roll.update(err_roll, dt)
-        pitch_del = self._pid_pitch.update(err_pitch, dt)
-        yaw_del = self._pid_yaw.update(err_yaw, dt)
+        roll_del = self._pid_roll.update(err_roll, dt, measurement_rate=attitude_rate[0])
+        pitch_del = self._pid_pitch.update(err_pitch, dt, measurement_rate=attitude_rate[1])
+        yaw_del = self._pid_yaw.update(err_yaw, dt, measurement_rate=attitude_rate[2])
 
         thrust = self.throttle_offset
         # quadcopter_controller.py のミキサー式と同じパターン(x_vel/y_velは
@@ -188,6 +208,7 @@ def main():
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT),
+        rigid_options=gs.options.RigidOptions(dt=DT / 2),
         vis_options=gs.options.VisOptions(show_world_frame=False),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -2.0, 1.0),
@@ -206,6 +227,8 @@ def main():
 
     scene.build()
     com_link_idx = drone.get_link("base_link").idx
+    disarmed_pos = drone.get_pos().clone()
+    disarmed_quat = drone.get_quat().clone()
 
     controller = ManualFlightController(drone)
     wind = SingleDroneWind(seed=args.seed) if args.wind else None
@@ -215,6 +238,12 @@ def main():
     def stop():
         nonlocal is_running
         is_running = False
+
+    def toggle_arm():
+        if not controller.armed:
+            drone.set_pos(disarmed_pos, zero_velocity=True)
+            drone.set_quat(disarmed_quat, zero_velocity=True)
+        controller.toggle_arm()
 
     def axis_keybinds(name, key_pos, key_neg, setter):
         """押している間+1/-1、離すと0に戻る軸(ロール/ピッチ/ヨー用)"""
@@ -228,15 +257,16 @@ def main():
     scene.viewer.register_keybinds(
         *axis_keybinds("pitch", Key.UP, Key.DOWN, controller.set_pitch),
         *axis_keybinds("roll", Key.RIGHT, Key.LEFT, controller.set_roll),
-        *axis_keybinds("yaw", Key.D, Key.A, controller.set_yaw),
-        *axis_keybinds("throttle", Key.W, Key.S, controller.set_throttle),
-        Keybind("arm_toggle", Key.RETURN, KeyAction.RELEASE, callback=controller.toggle_arm),
+        *axis_keybinds("yaw", Key.E, Key.Q, controller.set_yaw),
+        *axis_keybinds("throttle", Key.SPACE, Key.LSHIFT, controller.set_throttle),
+        Keybind("arm_toggle", Key.RETURN, KeyAction.RELEASE, callback=toggle_arm),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
     )
 
     print("\n=== 操作方法(完全手動。実機のモード2送信機に準拠) ===")
-    print("W / S       : スロットル増加 / 減少(離しても値を保持)")
-    print("A / D       : 左旋回 / 右旋回(ヨー)")
+    print("Space      : スロットル増加(離しても値を保持)")
+    print("Left Shift : スロットル減少(離しても値を保持)")
+    print("Q / E       : 左旋回 / 右旋回(ヨー)")
     print("↑ / ↓       : 前傾 / 後傾(ピッチ)")
     print("← / →       : 左傾 / 右傾(ロール)")
     print("Enter       : アーム / ディスアーム")
@@ -249,9 +279,24 @@ def main():
 
     try:
         while is_running:
+            if not controller.armed:
+                drone.set_pos(disarmed_pos, zero_velocity=True)
+                drone.set_quat(disarmed_quat, zero_velocity=True)
+
             rpms = controller.update(DT)
             rpms = [max(MIN_RPM, min(r, MAX_RPM)) for r in rpms]
             drone.set_propellers_rpm(rpms)
+
+            # CF2Xのゼロ質量プロペラリンクでは差動推力の腕長トルクが伝わらないため補う
+            prop_forces = [PROP_KF * rpm**2 for rpm in rpms]
+            roll_torque = PROP_ARM_LENGTH * (prop_forces[2] + prop_forces[3] - prop_forces[0] - prop_forces[1])
+            pitch_torque = PROP_ARM_LENGTH * (prop_forces[1] + prop_forces[2] - prop_forces[0] - prop_forces[3])
+            drone.solver.apply_links_external_torque(
+                torch.tensor([[roll_torque, pitch_torque, 0.0]], dtype=torch.float32),
+                links_idx=[drone.get_link("base_link").idx],
+                ref="link_origin",
+                local=True,
+            )
 
             if wind is not None and controller.armed:
                 w = wind.step(DT)
