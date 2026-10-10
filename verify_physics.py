@@ -64,7 +64,7 @@ class PhysicsVerifier:
             self.drone.solver.apply_links_external_wrench(
                 force=torch.tensor([list(ext_force)], dtype=torch.float32),
                 links_idx=[self.com_link_idx],
-                ref="link_com",
+                ref=gs.link_ref_frame.link_COM,
                 local=False,
             )
         scene.step()
@@ -327,7 +327,7 @@ class PhysicsVerifier:
     # テスト9: 外力が毎ステップ自動クリアされるか
     # ------------------------------------------------------------------ #
     def test_external_force_persistence(self, scene):
-        """9: apply_links_external_force で加えた外力が、次のステップに持ち越されるか
+        """9: apply_links_external_wrench で加えた外力が、次のステップに持ち越されるか
 
         WindHoverEnv は毎ステップ風を加えている。もし外力が自動でクリアされず
         蓄積される仕様なら、風が際限なく膨らんでしまう。それを確認する。

@@ -215,7 +215,7 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="風のパラメータのシード")
     args = parser.parse_args()
 
-    gs.init(backend=gs.cpu)
+    gs.init(backend=gs.gpu)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT),
@@ -225,6 +225,8 @@ def main():
             camera_pos=(0.0, -2.0, 1.0),
             camera_lookat=(0.0, 0.0, 0.3),
             camera_fov=45,
+            realtime_factor=1.0,
+            run_in_thread=False,
         ),
         show_viewer=True,
         show_FPS=False,
@@ -304,7 +306,7 @@ def main():
             drone.solver.apply_links_external_wrench(
                 torque=torch.tensor([[roll_torque, pitch_torque, 0.0]], dtype=torch.float32),
                 links_idx=[drone.get_link("base_link").idx],
-                ref="link_origin",
+                ref=gs.link_ref_frame.link_origin,
                 local=True,
             )
 
@@ -313,7 +315,7 @@ def main():
                 drone.solver.apply_links_external_wrench(
                     force=torch.tensor([list(w)], dtype=torch.float32),
                     links_idx=[com_link_idx],
-                    ref="link_com",
+                    ref=gs.link_ref_frame.link_COM,
                     local=False,
                 )
 

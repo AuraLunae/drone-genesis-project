@@ -252,7 +252,7 @@ def main():
                 drone.solver.apply_links_external_wrench(
                     force=torch.tensor([list(w)], dtype=torch.float32),  # (n_links_idx, 3) = (1, 3)
                     links_idx=[com_link_idx],
-                    ref="link_com",
+                    ref=gs.link_ref_frame.link_COM,
                     local=False,
                 )
 

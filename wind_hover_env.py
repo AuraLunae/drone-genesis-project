@@ -195,7 +195,7 @@ class WindHoverEnv:
         self.rigid_solver.apply_links_external_wrench(
             force=self.wind_vec.unsqueeze(1),  # (num_envs, 3) -> (num_envs, 1, 3): 対象リンクが1つのため
             links_idx=[self.com_link_idx],
-            ref="link_com",
+            ref=gs.link_ref_frame.link_COM,
             local=False,
         )
 
