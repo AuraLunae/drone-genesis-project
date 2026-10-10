@@ -5,7 +5,9 @@ description = "Wind-resistant drone hovering RL on Genesis World (DroneEntity/CF
 requires-python = ">=3.10,<3.14"  # torch(cu126)のwheelがcp313までのため、3.14が自動選択されないよう上限を設定
 dependencies = [
     "torch>=2.8.0",  # Genesisがtorch<2.8.0を非サポートと警告するため明示的に固定
-    "genesis-world",
+    # 1.2.3では差動RPMがロール/ピッチのトルクを生まない不具合がある(verify_physics.pyで
+    # 実測確認)。1.4.1では直っているため、下限を固定する。
+    "genesis-world>=1.4.1",
     "rsl-rl-lib>=5.0.0",
     "tensordict",
     "tensorboard",
