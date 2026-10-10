@@ -121,10 +121,7 @@ class WindHoverEnv:
         self.com_link = self.drone.get_link("base_link")
         self.com_link_idx = self.com_link.idx
 
-        # 風を加えるAPIはRigidLink/RigidEntity側ではなく、ソルバー側の
-        # apply_links_external_force(force, links_idx, envs_idx, ref, local)。
-        # このバージョンにはpos引数が無く、ref="link_com"で重心に力を加える
-        # (=トルクを発生させない純粋な並進力)扱いになる。
+        # 重心に風力を加え、風による不要なトルクを防ぐ。
         self.rigid_solver = self.drone.solver
 
         # 事前学習時と同じく、報酬スケールにdtを乗じる
@@ -195,8 +192,8 @@ class WindHoverEnv:
         clip_scale = torch.clamp(max_wind_norm / (wind_norm + 1e-8), max=1.0)
         self.wind_vec = self.wind_vec * clip_scale
 
-        self.rigid_solver.apply_links_external_force(
-            self.wind_vec.unsqueeze(1),  # (num_envs, 3) -> (num_envs, 1, 3): 対象リンクが1つのため
+        self.rigid_solver.apply_links_external_wrench(
+            force=self.wind_vec.unsqueeze(1),  # (num_envs, 3) -> (num_envs, 1, 3): 対象リンクが1つのため
             links_idx=[self.com_link_idx],
             ref="link_com",
             local=False,

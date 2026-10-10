@@ -61,8 +61,8 @@ class PhysicsVerifier:
             rpms = [float(rpms)] * 4
         self.drone.set_propellers_rpm([float(r) for r in rpms])
         if ext_force is not None:
-            self.drone.solver.apply_links_external_force(
-                torch.tensor([list(ext_force)], dtype=torch.float32),
+            self.drone.solver.apply_links_external_wrench(
+                force=torch.tensor([list(ext_force)], dtype=torch.float32),
                 links_idx=[self.com_link_idx],
                 ref="link_com",
                 local=False,
@@ -300,7 +300,7 @@ class PhysicsVerifier:
     # テスト8: 風力(外力)印加の純粋性
     # ------------------------------------------------------------------ #
     def test_wind_force_purity(self, scene):
-        """8: apply_links_external_force(ref='link_com')が、並進力のみでトルクを誘発しないか"""
+        """8: apply_links_external_wrench(ref='link_com')が、並進力のみでトルクを誘発しないか"""
         self.reset_drone()
         for _ in range(5):
             self.step(scene, BASE_RPM)  # 鉛直は打ち消しておく
@@ -315,7 +315,7 @@ class PhysicsVerifier:
         accel_measured = (vel1[:2] - vel0[:2]) / (n_steps * DT)
         ang_vel_change = float(np.linalg.norm(ang1 - ang0))
 
-        self.log("8. 風力(apply_links_external_force)の純粋性(トルク誘発の有無)", [
+        self.log("8. 風力(apply_links_external_wrench)の純粋性(トルク誘発の有無)", [
             f"与えた水平外力: {force[:2]} N",
             f"測定された水平加速度: {accel_measured.round(4)} m/s^2 (向きが外力と一致するか確認)",
             f"角速度の変化量ノルム: {ang_vel_change:.4f} rad/s",

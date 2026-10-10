@@ -301,8 +301,8 @@ def main():
             prop_forces = [PROP_KF * rpm**2 for rpm in rpms]
             roll_torque = PROP_ARM_LENGTH * (prop_forces[2] + prop_forces[3] - prop_forces[0] - prop_forces[1])
             pitch_torque = PROP_ARM_LENGTH * (prop_forces[1] + prop_forces[2] - prop_forces[0] - prop_forces[3])
-            drone.solver.apply_links_external_torque(
-                torch.tensor([[roll_torque, pitch_torque, 0.0]], dtype=torch.float32),
+            drone.solver.apply_links_external_wrench(
+                torque=torch.tensor([[roll_torque, pitch_torque, 0.0]], dtype=torch.float32),
                 links_idx=[drone.get_link("base_link").idx],
                 ref="link_origin",
                 local=True,
@@ -310,8 +310,8 @@ def main():
 
             if wind is not None and controller.armed:
                 w = wind.step(DT)
-                drone.solver.apply_links_external_force(
-                    torch.tensor([list(w)], dtype=torch.float32),
+                drone.solver.apply_links_external_wrench(
+                    force=torch.tensor([list(w)], dtype=torch.float32),
                     links_idx=[com_link_idx],
                     ref="link_com",
                     local=False,

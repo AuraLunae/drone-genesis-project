@@ -249,8 +249,8 @@ def main():
 
             if wind is not None:
                 w = wind.step(DT)
-                drone.solver.apply_links_external_force(
-                    torch.tensor([list(w)], dtype=torch.float32),  # (n_links_idx, 3) = (1, 3)
+                drone.solver.apply_links_external_wrench(
+                    force=torch.tensor([list(w)], dtype=torch.float32),  # (n_links_idx, 3) = (1, 3)
                     links_idx=[com_link_idx],
                     ref="link_com",
                     local=False,
