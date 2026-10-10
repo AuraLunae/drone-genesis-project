@@ -13,6 +13,13 @@ dependencies = [
     "tensorboard",
 ]
 
+[tool.uv]
+# uvは既定で「全OS向け」の解決を一度に行う。genesis-world>=1.4.1 はLinux専用の
+# gs-madrona に依存し、それが nvidia-cuda-nvrtc-cu12>=12.8 を要求するため、
+# cu126版torch(12.6.x固定)とLinuxで衝突して全体の解決が失敗する。
+# このプロジェクトはWindowsでしか動かさないので、解決対象をWindowsに絞る。
+environments = ["sys_platform == 'win32'"]
+
 # PyTorchはCUDAビルドをuvのindexで明示的に指定する。
 # 使っているCUDAバージョンに合わせて書き換えること(下記はCUDA 12.6の例)。
 [tool.uv.sources]
