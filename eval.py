@@ -62,10 +62,10 @@ def main():
         show_viewer=True,
     )
 
-    print(f"=== 評価対象: {ckpt_path} ===")
     runner = OnPolicyRunner(env, train_cfg, log_dir, device=gs.device)
     runner.load(ckpt_path)
     policy = runner.get_inference_policy(device=gs.device)
+    print(f"=== 飛行中のモデル: {os.path.basename(ckpt_path)} (run: {os.path.basename(log_dir)}) ===")
 
     obs_dict = env.reset()
     max_sim_step = int(env_cfg["episode_length_s"] * env_cfg["max_visualize_FPS"])
