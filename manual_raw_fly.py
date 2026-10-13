@@ -4,7 +4,7 @@ manual_raw_fly.py (完全手動 / 実機のモード2送信機に準拠)
 実際のドローン操縦機(モード2)に合わせた4軸操作:
 
   - 上下(Space / X) : 目標の「上下速度」を変える。離しても目標は保持され、
-                      Zキーで0(ホバリング)に戻せる。
+                      ホバリングキー(下記)で0に戻せる。
   - ヨー(Q / E)     : スティック位置は「回転速度」の指示。離せばその場の
                       機首方向を保持する(絶対角度を指示しているわけではない)。
   - ロール/ピッチ(矢印キー): スティック位置が目標の傾斜角になり、離せば水平に
@@ -16,7 +16,9 @@ manual_raw_fly.py (完全手動 / 実機のモード2送信機に準拠)
 操作方法:
   Space      : 目標の上昇速度を上げる(離しても目標速度は保持される)
   X          : 目標速度を下げる(0で停止、負で下降)
-  Z          : 目標上下速度を即座に0へ戻す(ホバリング)
+  B          : 目標上下速度を即座に0へ戻す(ホバリング)。Genesisのビューアが
+               標準機能に使っているキーと衝突する場合は、V, G, C, N, M の順に
+               空いているキーへ自動で割り当てる(割り当て結果は起動時に表示)
   Q / E      : 左旋回 / 右旋回(ヨー、離すと機首方向を保持)
   ↑ / ↓      : 起動時のカメラから見て 奥 / 手前 へ傾ける(ロール)
   ← / →      : 起動時のカメラから見て 左 / 右 へ傾ける(ピッチ)
@@ -246,6 +248,61 @@ class ManualFlightController:
         return [m1, m2, m3, m4]
 
 
+class PropellerVisual:
+    """プロペラの回転「表示」だけを、実際のRPMとは切り離して滑らかにする(物理には無関係)。
+
+    Genesisは、各ステップでプロペラの実際の回転量(rpmに比例)を表示角度に足し込む。
+    CF2Xは約14,500rpm(毎秒240回転)で回るため、100Hz前後のコマ送りで表示すると
+    ワゴンホイール効果が起き、1コマあたりの回転が180°付近になるRPMでは、対称な
+    プロペラは止まって見える(加速でRPMが上がると止まって見え、戻ると回って見える)。
+
+    そこで、実際のRPMに比例しつつ、1ステップあたりの表示回転角を小さく抑えた
+    表示用の角度を自前で積算し、Genesisの内部カウンタ(_propellers_revs)に上書きする。
+    内部カウンタが見つからない版では何もしない(self.enabled=False)。
+    """
+
+    VISUAL_SCALE = 0.04  # 実際の回転量に対する表示回転量の比。ホバリング付近で約35度/ステップ
+
+    def __init__(self, drone, dt, enabled=True):
+        self.drone = drone
+        revs = getattr(drone, "_propellers_revs", None)
+        self.enabled = bool(enabled) and isinstance(revs, torch.Tensor)
+        # Genesisが「1回転」に対応させているカウンタ周期。内部と同じ 60/solver.dt を使う。
+        # (食い違っても、周期が整数倍なら継ぎ目なく、そうでなくても180度のずれで済み、
+        #  ブレードが対称なプロペラでは目立たない)
+        self._wrap = 60.0 / float(getattr(drone.solver, "dt", dt))
+        self._revs = None
+
+    def apply(self, rpms):
+        """set_propellers_rpm の直後、scene.step() の前に毎ステップ呼ぶ"""
+        if not self.enabled:
+            return
+        revs = self.drone._propellers_revs  # 形状 (プロペラ数, 環境数)
+        if self._revs is None:
+            self._revs = torch.zeros_like(revs)
+        rpm_tensor = torch.tensor([float(r) for r in rpms], dtype=revs.dtype, device=revs.device).reshape(-1, 1)
+        self._revs = (self._revs + rpm_tensor * self.VISUAL_SCALE) % self._wrap
+        revs.copy_(self._revs)
+
+
+def register_first_free_key(viewer, candidate_names, name, callback):
+    """ビューアの標準キーと衝突しない最初のキーに、コールバックを登録する。
+
+    Genesisのビューアは Z(reset_camera)など、いくつかのキーを標準機能に使っている。
+    どれが使用済みかは版によって異なるため、候補を順に試し、登録に成功した
+    最初のキー名を返す(全て失敗したらNone)。"""
+    for key_name in candidate_names:
+        key = getattr(Key, key_name, None)
+        if key is None:
+            continue
+        try:
+            viewer.register_keybinds(Keybind(name, key, KeyAction.RELEASE, callback=callback))
+            return key_name
+        except ValueError:  # 既に別の機能に割り当て済み
+            continue
+    return None
+
+
 def check_native_attitude_torque(scene, drone, pos, quat):
     """差動RPMが本当にロール/ピッチのトルクを生むかを3ステップで確認する。
     生まない版(Genesis 1.2.3など)では、PIDが機体を傾けられず操縦不能になる。"""
@@ -266,6 +323,8 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="風のパラメータのシード")
     parser.add_argument("--drag", type=float, default=0.0,
                         help="線形の空力抵抗[1/s]。既定0(AI/PIDモードと同条件)。目安は0.5程度")
+    parser.add_argument("--no-prop-fix", action="store_true",
+                        help="プロペラ回転の表示補正(ワゴンホイール効果対策)を無効にする")
     args = parser.parse_args()
 
     gs.init(backend=gs.gpu)
@@ -305,6 +364,7 @@ def main():
 
     controller = ManualFlightController(drone)
     wind = SingleDroneWind(seed=args.seed) if args.wind else None
+    prop_visual = PropellerVisual(drone, DT, enabled=not args.no_prop_fix)
 
     is_running = True
 
@@ -336,14 +396,20 @@ def main():
         Keybind("arm_toggle", Key.RETURN, KeyAction.RELEASE, callback=toggle_arm),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
     ]
-    if hasattr(Key, "Z"):  # 念のため存在確認(無ければこのキーだけ無効)
-        keybinds.append(Keybind("hover_hold", Key.Z, KeyAction.RELEASE, callback=controller.zero_vertical_speed))
     scene.viewer.register_keybinds(*keybinds)
+
+    # ホバリング用キーは、ビューアの標準キー(Zはreset_cameraなど)と衝突しない最初の候補を使う
+    hover_key = register_first_free_key(
+        scene.viewer, ["B", "V", "G", "C", "N", "M"], "hover_hold", controller.zero_vertical_speed
+    )
 
     print("\n=== 操作方法(完全手動。実機のモード2送信機に準拠) ===")
     print("Space       : 目標の上昇速度を上げる(離しても保持)")
     print("X           : 目標速度を下げる(0で停止、負で下降)")
-    print("Z           : 目標上下速度を即座に0へ(ホバリング)")
+    if hover_key is not None:
+        print(f"{hover_key}           : 目標上下速度を即座に0へ(ホバリング)")
+    else:
+        print("(ホバリング用キーは、空いているキーが無く無効。Xで目標速度を戻してください)")
     print("Q / E       : 左旋回 / 右旋回(ヨー)")
     print("↑ / ↓       : 奥 / 手前へ傾ける(起動時のカメラ基準)")
     print("← / →       : 左 / 右へ傾ける(起動時のカメラ基準)")
@@ -356,6 +422,10 @@ def main():
         print("風: 無効(--wind で有効化)")
     if args.drag > 0.0:
         print(f"空力抵抗: 有効(係数 {args.drag} 1/s)。AI/PIDモードには無い物理なので比較時は注意")
+    if prop_visual.enabled:
+        print("プロペラ表示補正: 有効(加速で止まって見える現象への対策。物理には影響しません)")
+    else:
+        print("プロペラ表示補正: 無効(--no-prop-fix 指定、またはこの版に内部カウンタが見つかりません)")
 
     step_count = 0
     try:
@@ -367,6 +437,7 @@ def main():
             rpms = controller.update(DT)
             rpms = [max(MIN_RPM, min(r, MAX_RPM)) for r in rpms]
             drone.set_propellers_rpm(rpms)
+            prop_visual.apply(rpms)  # 表示用のプロペラ角度だけを上書き(物理には影響しない)
 
             # 外力(風 + 任意の空力抵抗)は、1ステップに1回の呼び出しにまとめて重心に加える
             if controller.armed and (wind is not None or args.drag > 0.0):
@@ -394,7 +465,8 @@ def main():
                 horizontal_speed = math.hypot(vel[0], vel[1])
                 print(
                     f"\r高度 {pos[2]:5.2f}m | 上下 {vel[2]:+5.2f}(目標 {controller.target_vertical_speed:+4.2f})m/s"
-                    f" | 水平 {horizontal_speed:4.2f}m/s | R{roll:+6.1f} P{pitch:+6.1f} Y{yaw:+7.1f}deg   ",
+                    f" | 水平 {horizontal_speed:4.2f}m/s | R{roll:+6.1f} P{pitch:+6.1f} Y{yaw:+7.1f}deg"
+                    f" | {sum(rpms) / 4:6.0f}rpm   ",
                     end="", flush=True,
                 )
     except KeyboardInterrupt:
