@@ -4,13 +4,13 @@ WindHoverEnv の学習スクリプト。
 
 実行例:
   # 新規学習(logs/wind-hovering/{タイムスタンプ}/ に保存される)
-  python train.py -e wind-hovering -b 8192 --max-iterations 301
+  python train.py   # 既定値: -e wind-hovering -b 16384 --max-iterations 601
 
   # 中断・終了後、続きから追加学習(最新のランを自動検出)
-  python train.py -e wind-hovering -b 8192 --max-iterations 200 --resume latest
+  python train.py -e wind-hovering -b 16384 --max-iterations 200 --resume latest
 
   # 特定のランから追加学習
-  python train.py -e wind-hovering -b 8192 --max-iterations 200 --resume logs/wind-hovering/20261004_120000
+  python train.py -e wind-hovering -b 16384 --max-iterations 200 --resume logs/wind-hovering/20261004_120000
 """
 
 import argparse
@@ -155,8 +155,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp-name", type=str, default="wind-hovering")
     parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
-    parser.add_argument("-b", "--num-envs", type=int, default=8192, help="Number of parallel environments")
-    parser.add_argument("--max-iterations", type=int, default=301, help="新規学習なら総イテレーション数、--resume指定時はそこからの追加イテレーション数")
+    parser.add_argument("-b", "--num-envs", type=int, default=16384, help="並列環境数。VRAMが足りない場合は下げる")
+    parser.add_argument("--max-iterations", type=int, default=601, help="新規学習なら総イテレーション数、--resume指定時はそこからの追加イテレーション数")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument(
         "--resume",
@@ -166,7 +166,7 @@ def main():
     )
     args = parser.parse_args()
 
-    # 8192並列などの大規模学習にはGPUが必須。VRAMが足りない場合は -b で下げること。
+    # 16384並列などの大規模学習にはGPUが必須。VRAMが足りない場合は -b で下げること。
     gs.init(backend=gs.gpu, precision="32", logging_level="warning", seed=args.seed, performance_mode=True)
 
     resume_ckpt_path = None
@@ -214,11 +214,11 @@ if __name__ == "__main__":
 
 """
 # 新規学習(logs/wind-hovering/{タイムスタンプ}/ に保存される)
-python train.py -e wind-hovering -b 8192 --max-iterations 301
+python train.py   # 既定値: -e wind-hovering -b 16384 --max-iterations 601
 
 # TensorBoardでログ確認(exp-name配下の全ランをまとめて見られる)
 tensorboard --logdir logs/wind-hovering
 
 # 中断・終了後、続きから追加学習
-python train.py -e wind-hovering -b 8192 --max-iterations 200 --resume latest
+python train.py -e wind-hovering -b 16384 --max-iterations 200 --resume latest
 """
