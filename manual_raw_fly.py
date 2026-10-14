@@ -45,11 +45,12 @@ import argparse
 import math
 
 import numpy as np
-import torch
 
 import genesis as gs
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 from genesis.utils.geom import quat_to_xyz
+
+from genesis_compat import PropellerVisual, apply_com_force
 
 DT = 0.01
 G = 9.81
@@ -248,43 +249,6 @@ class ManualFlightController:
         return [m1, m2, m3, m4]
 
 
-class PropellerVisual:
-    """プロペラの回転「表示」だけを、実際のRPMとは切り離して滑らかにする(物理には無関係)。
-
-    Genesisは、各ステップでプロペラの実際の回転量(rpmに比例)を表示角度に足し込む。
-    CF2Xは約14,500rpm(毎秒240回転)で回るため、100Hz前後のコマ送りで表示すると
-    ワゴンホイール効果が起き、1コマあたりの回転が180°付近になるRPMでは、対称な
-    プロペラは止まって見える(加速でRPMが上がると止まって見え、戻ると回って見える)。
-
-    そこで、実際のRPMに比例しつつ、1ステップあたりの表示回転角を小さく抑えた
-    表示用の角度を自前で積算し、Genesisの内部カウンタ(_propellers_revs)に上書きする。
-    内部カウンタが見つからない版では何もしない(self.enabled=False)。
-    """
-
-    VISUAL_SCALE = 0.04  # 実際の回転量に対する表示回転量の比。ホバリング付近で約35度/ステップ
-
-    def __init__(self, drone, dt, enabled=True):
-        self.drone = drone
-        revs = getattr(drone, "_propellers_revs", None)
-        self.enabled = bool(enabled) and isinstance(revs, torch.Tensor)
-        # Genesisが「1回転」に対応させているカウンタ周期。内部と同じ 60/solver.dt を使う。
-        # (食い違っても、周期が整数倍なら継ぎ目なく、そうでなくても180度のずれで済み、
-        #  ブレードが対称なプロペラでは目立たない)
-        self._wrap = 60.0 / float(getattr(drone.solver, "dt", dt))
-        self._revs = None
-
-    def apply(self, rpms):
-        """set_propellers_rpm の直後、scene.step() の前に毎ステップ呼ぶ"""
-        if not self.enabled:
-            return
-        revs = self.drone._propellers_revs  # 形状 (プロペラ数, 環境数)
-        if self._revs is None:
-            self._revs = torch.zeros_like(revs)
-        rpm_tensor = torch.tensor([float(r) for r in rpms], dtype=revs.dtype, device=revs.device).reshape(-1, 1)
-        self._revs = (self._revs + rpm_tensor * self.VISUAL_SCALE) % self._wrap
-        revs.copy_(self._revs)
-
-
 def register_first_free_key(viewer, candidate_names, name, callback):
     """ビューアの標準キーと衝突しない最初のキーに、コールバックを登録する。
 
@@ -447,12 +411,7 @@ def main():
                 if args.drag > 0.0:
                     velocity = np.array([float(v) for v in drone.get_vel()])
                     force -= args.drag * MASS_KG * velocity
-                drone.solver.apply_links_external_wrench(
-                    force=torch.tensor([force.tolist()], dtype=torch.float32),
-                    links_idx=[com_link_idx],
-                    ref=gs.link_ref_frame.link_COM,
-                    local=False,
-                )
+                apply_com_force(drone, com_link_idx, force)
 
             scene.step()
 

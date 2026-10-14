@@ -11,15 +11,15 @@ OU過程(Ornstein-Uhlenbeck process)による時間変化する風外乱を追�
   3. step()で scene.step() の直前に、ドローンのCOMリンクへOU過程の風力を加える
   4. reset_idx()で初期位置を base_init_pos 周辺でランダム化(ドメインランダム化)
 
-観測・報酬・終了条件は公式HoverEnvと同一(風の情報は観測に含めない。
-風を直接観測させず、姿勢の乱れから間接的に対処させることで、ロバスト性を狙う)。
+観測は公式HoverEnvと同一(風の情報は観測に含めない。風を直接観測させず、姿勢の乱れから
+間接的に対処させることで、ロバスト性を狙う)。報酬・終了条件は、これまでの検討で拡張している
+(報酬は train.py の reward_cfg、終了条件は env_cfg を参照)。
 
-このファイル中の `apply_external_force` の呼び出しは Genesis World の
-`RigidLink.apply_external_force(force, envs_idx=None, *, pos=None, ref=..., local=False)`
-API に基づく想定です。お使いのGenesisのバージョンで `drone.links[drone.COM_link_idx]`
-が期待通りのRigidLinkを返すか、最初に短いスクリプトで一度確認してから
-本番学習に進んでください(バージョンによりCOMリンクへのアクセス方法が
-変わっている可能性があります)。
+Genesisの版について:
+  Genesis 1.2.3 には「差動RPMがロール/ピッチのトルクを生まない」不具合があり、この環境では
+  機体を傾けられず水平移動ができない(verify_physics.py のテスト4で実測確認)。
+  genesis-world>=1.4.1 を使うこと(pyproject.toml で下限を固定している)。
+  版によって異なる外力APIなどは genesis_compat.py に集約してあり、この環境はそこを経由する。
 """
 
 import torch
@@ -34,6 +34,8 @@ from genesis.utils.geom import (
     inv_quat,
     transform_quat_by_quat,
 )
+
+from genesis_compat import PropellerVisual, apply_com_force
 
 
 def gs_rand_float(lower, upper, shape, device):
@@ -113,16 +115,19 @@ class WindHoverEnv:
         self.scene.build(n_envs=num_envs)
 
         # ドローンのCOMリンク(風・外乱力を加える対象)
-        # 注: Genesis 1.4.3時点では DroneEntity.COM_link_idx が未初期化(内部属性
-        # _COM_link_idx が設定されずAttributeErrorになる)バグがあるため、
-        # COM_link_idx経由ではなく、CF2XのURDFに実在するリンク名"base_link"を
-        # 直接指定して取得する。Genesis側でこのバグが修正されたら
-        # COM_link_idx経由に戻してよい。
+        # 注: Genesis 1.2.3 では DroneEntity.COM_link_idx が未初期化(内部属性
+        # _COM_link_idx が設定されずAttributeErrorになる)ため、COM_link_idx経由では
+        # なく、CF2XのURDFに実在するリンク名"base_link"を直接指定して取得する。
         self.com_link = self.drone.get_link("base_link")
         self.com_link_idx = self.com_link.idx
 
-        # 重心に風力を加え、風による不要なトルクを防ぐ。
-        self.rigid_solver = self.drone.solver
+        # 風を加えるAPI(版によって名前・置き場所が違う)は genesis_compat.apply_com_force
+        # に集約してある。重心(link_com)に並進力だけを加え、トルクは誘発しない
+        # (verify_physics.py のテスト8で確認済み)。
+
+        # 学習中はビューアが無いので何もしない。評価(eval.py)でビューアを出す時だけ、
+        # プロペラが加速で止まって見える現象(ワゴンホイール効果)を避ける表示補正を入れる。
+        self.prop_visual = PropellerVisual(self.drone, self.dt) if show_viewer else None
 
         # 事前学習時と同じく、報酬スケールにdtを乗じる
         self.reward_functions, self.episode_sums = dict(), dict()
@@ -176,7 +181,7 @@ class WindHoverEnv:
 
         注: OU過程はガウスノイズを含むため理論上は無限大の値も取り得る。
         8192並列×毎ステップでガウス乱数を引き続けると、試行回数が膨大なため
-        「滅多に起きない極端な外れ値」がいつかは必ず発生し、軽量な機体(約34g)に
+        「滅多に起きない極端な外れ値」がいつかは必ず発生し、軽量な機体(約27g)に
         一瞬で過大な力が加わって物理シミュレーションがNaNで発散する原因になり得る。
         これを防ぐため、風の大きさ(ノルム)を strength_range の上限の数倍で
         クリップする(方向は変えず大きさだけ制限する)。
@@ -192,12 +197,7 @@ class WindHoverEnv:
         clip_scale = torch.clamp(max_wind_norm / (wind_norm + 1e-8), max=1.0)
         self.wind_vec = self.wind_vec * clip_scale
 
-        self.rigid_solver.apply_links_external_wrench(
-            force=self.wind_vec.unsqueeze(1),  # (num_envs, 3) -> (num_envs, 1, 3): 対象リンクが1つのため
-            links_idx=[self.com_link_idx],
-            ref=gs.link_ref_frame.link_COM,
-            local=False,
-        )
+        apply_com_force(self.drone, self.com_link_idx, self.wind_vec, n_envs=self.num_envs)
 
     def _at_target(self):
         return (
@@ -212,7 +212,10 @@ class WindHoverEnv:
         exec_actions = self.actions
 
         # 14468.429... はCF2Xモデルのホバリング基準RPM
-        self.drone.set_propellers_rpm((1 + exec_actions * 0.8) * 14468.429183500699)
+        propeller_rpms = (1 + exec_actions * 0.8) * 14468.429183500699
+        self.drone.set_propellers_rpm(propeller_rpms)
+        if self.prop_visual is not None:
+            self.prop_visual.apply(propeller_rpms)  # 表示用のプロペラ角度だけを上書き(物理には影響しない)
 
         if self.target is not None:
             self.target.set_pos(self.commands, zero_velocity=True)
@@ -246,6 +249,14 @@ class WindHoverEnv:
             | (torch.abs(self.rel_pos[:, 2]) > self.env_cfg["termination_if_z_greater_than"])
             | (self.base_pos[:, 2] < self.env_cfg["termination_if_close_to_ground"])
         )
+
+        # 角速度による終了条件。この物理モデルには空力抵抗が無く(verify_physics.py
+        # のテスト6)、ヨー反トルクで回り始めると減衰せず際限なく角速度が積み上がる。
+        # 学習初期のランダムな方策がヨーを空転させ続けるのを、ここで打ち切る。
+        # 設定が無い(古いcfgs.pklを読み込んだ)場合は何もしない。
+        max_ang_vel = self.env_cfg.get("termination_if_ang_vel_greater_than")
+        if max_ang_vel is not None:
+            self.crash_condition = self.crash_condition | (torch.norm(self.base_ang_vel, dim=1) > max_ang_vel)
 
         self.reset_buf = (self.episode_length_buf > self.max_episode_length) | self.crash_condition
         time_out_idx = (self.episode_length_buf > self.max_episode_length).nonzero(as_tuple=False).reshape((-1,))

@@ -28,11 +28,12 @@ import argparse
 import math
 
 import numpy as np
-import torch
 
 import genesis as gs
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 from genesis.utils.geom import quat_to_xyz
+
+from genesis_compat import PropellerVisual, apply_com_force
 
 DT = 0.01  # train.py / wind_hover_env.py と同じ制御周期(100Hz)
 BASE_RPM = 14468.429183500699  # CF2Xのホバリング基準RPM(公式サンプルと同一)
@@ -199,11 +200,12 @@ def main():
 
     scene.build()
 
-    com_link_idx = drone.get_link("base_link").idx  # wind_hover_env.pyと同じ回避策
+    com_link_idx = drone.get_link("base_link").idx  # COM_link_idxは1.2.3で未初期化のため使わない
 
     controller = DronePIDController(drone=drone, dt=DT, base_rpm=BASE_RPM, pid_params=pid_params)
     target_ctrl = TargetController(initial_target=(0.0, 0.0, 1.0))
     wind = SingleDroneWind(seed=args.seed) if args.wind else None
+    prop_visual = PropellerVisual(drone, DT)  # プロペラが加速で止まって見える現象の表示補正
 
     is_running = True
 
@@ -246,15 +248,10 @@ def main():
             rpms = controller.update(target_ctrl.target)
             rpms = [max(MIN_RPM, min(r, MAX_RPM)) for r in rpms]
             drone.set_propellers_rpm(rpms)
+            prop_visual.apply(rpms)  # 表示用のプロペラ角度だけを上書き(物理には影響しない)
 
             if wind is not None:
-                w = wind.step(DT)
-                drone.solver.apply_links_external_wrench(
-                    force=torch.tensor([list(w)], dtype=torch.float32),  # (n_links_idx, 3) = (1, 3)
-                    links_idx=[com_link_idx],
-                    ref=gs.link_ref_frame.link_COM,
-                    local=False,
-                )
+                apply_com_force(drone, com_link_idx, wind.step(DT))
 
             scene.step()
     except KeyboardInterrupt:

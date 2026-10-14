@@ -32,6 +32,8 @@ import torch
 import genesis as gs
 from genesis.utils.geom import quat_to_xyz
 
+from genesis_compat import apply_com_force
+
 DT = 0.01
 BASE_RPM = 14468.429183500699  # CF2Xのホバリング基準RPM(公式サンプルの値)
 
@@ -61,12 +63,7 @@ class PhysicsVerifier:
             rpms = [float(rpms)] * 4
         self.drone.set_propellers_rpm([float(r) for r in rpms])
         if ext_force is not None:
-            self.drone.solver.apply_links_external_wrench(
-                force=torch.tensor([list(ext_force)], dtype=torch.float32),
-                links_idx=[self.com_link_idx],
-                ref=gs.link_ref_frame.link_COM,
-                local=False,
-            )
+            apply_com_force(self.drone, self.com_link_idx, ext_force)  # 版差は genesis_compat が吸収
         scene.step()
 
     def get_state(self):
@@ -198,7 +195,7 @@ class PhysicsVerifier:
             f"{t:.2f}秒後の姿勢(roll,pitch,yaw): {att.round(2)} deg",
             "判定: " + (
                 "手動補正無しでもトルクは伝わっている" if abs(pitch_rate) > 0.05
-                else "手動補正無しではトルクがほぼ伝わっていない(ユーザーの修正が必要だった根拠)"
+                else "差動RPMのトルクが伝わっていない(Genesis 1.2.3の既知の不具合。1.4.1以上に更新すること)"
             ),
         ])
         return pitch_rate
@@ -217,7 +214,7 @@ class PhysicsVerifier:
             f"{t:.2f}秒後の姿勢(roll,pitch,yaw): {att.round(2)} deg",
             "判定: " + (
                 "手動補正無しでもトルクは伝わっている" if abs(roll_rate) > 0.05
-                else "手動補正無しではトルクがほぼ伝わっていない"
+                else "差動RPMのトルクが伝わっていない(Genesis 1.2.3の既知の不具合。1.4.1以上に更新すること)"
             ),
         ])
         return roll_rate
@@ -300,7 +297,7 @@ class PhysicsVerifier:
     # テスト8: 風力(外力)印加の純粋性
     # ------------------------------------------------------------------ #
     def test_wind_force_purity(self, scene):
-        """8: apply_links_external_wrench(ref='link_com')が、並進力のみでトルクを誘発しないか"""
+        """8: 重心への外力(apply_com_force)が、並進力のみでトルクを誘発しないか"""
         self.reset_drone()
         for _ in range(5):
             self.step(scene, BASE_RPM)  # 鉛直は打ち消しておく
@@ -315,7 +312,7 @@ class PhysicsVerifier:
         accel_measured = (vel1[:2] - vel0[:2]) / (n_steps * DT)
         ang_vel_change = float(np.linalg.norm(ang1 - ang0))
 
-        self.log("8. 風力(apply_links_external_wrench)の純粋性(トルク誘発の有無)", [
+        self.log("8. 風力(重心への外力)の純粋性(トルク誘発の有無)", [
             f"与えた水平外力: {force[:2]} N",
             f"測定された水平加速度: {accel_measured.round(4)} m/s^2 (向きが外力と一致するか確認)",
             f"角速度の変化量ノルム: {ang_vel_change:.4f} rad/s",
@@ -327,7 +324,7 @@ class PhysicsVerifier:
     # テスト9: 外力が毎ステップ自動クリアされるか
     # ------------------------------------------------------------------ #
     def test_external_force_persistence(self, scene):
-        """9: apply_links_external_wrench で加えた外力が、次のステップに持ち越されるか
+        """9: 外力(apply_com_force)で加えた力が、次のステップに持ち越されるか
 
         WindHoverEnv は毎ステップ風を加えている。もし外力が自動でクリアされず
         蓄積される仕様なら、風が際限なく膨らんでしまう。それを確認する。
@@ -372,6 +369,7 @@ class PhysicsVerifier:
         with open(path, "w", encoding="utf-8") as f:
             f.write("# Genesis/CF2X 物理検証レポート\n\n")
             f.write(f"実行日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(f"Genesisのバージョン: {getattr(gs, '__version__', '不明')}\n\n")
             for title, lines in self.results:
                 f.write(f"## {title}\n\n")
                 for line in lines:
@@ -402,6 +400,7 @@ def main():
 
     print("=" * 70)
     print(" Genesis / CF2X 物理モデル検証")
+    print(f" Genesisのバージョン: {getattr(gs, '__version__', '不明')}")
     print("=" * 70)
 
     verifier.test_gravity(scene)
