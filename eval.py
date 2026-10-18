@@ -44,11 +44,11 @@ def main():
         "--wind-flag",
         dest="flag_style",
         nargs="?",
-        const="cloth",
+        const="cloth-mesh",
         choices=ALL_STYLES,
-        default="cloth",
+        default="cloth-mesh",
         metavar="{cloth,cloth-mesh,plate}",
-        help="風を映す旗。既定はPBD布。cloth-meshは面表示、plateは剛体板",
+        help="風を映す旗。既定はPBD布の変形メッシュ表示。clothは粒子表示、plateは剛体板",
     )
     parser.add_argument("-t", "--time", dest="duration", type=float, default=60.0,
                         help="実行時間[秒]。既定60秒(旧版は約9秒だった)。録画時もこの長さになる")
@@ -122,6 +122,6 @@ python eval.py -e wind-hovering --run latest --record
 # 風を旗で可視化(既定で布旗。布が使えない環境では板旗に自動切替)
 python eval.py -e wind-hovering --run latest
 
-# PBD布ではなく剛体板の旗を使う
-python eval.py -e wind-hovering --run latest --flag-style plate
+# PBD布を使う場合(粒子表示)
+python eval.py -e wind-hovering --run latest --flag-style cloth
 """

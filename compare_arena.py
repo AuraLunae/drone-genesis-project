@@ -319,8 +319,8 @@ def main():
     parser.add_argument("--no-wind", action="store_true", help="風を無効にする")
     parser.add_argument("--gpu", action="store_true", help="GPUで実行する(既定はCPU。3機だけなのでCPUで十分)")
     parser.add_argument("--no-prop-fix", action="store_true", help="プロペラ回転の表示補正を無効にする")
-    parser.add_argument("--flag-style", choices=ALL_STYLES, default="cloth",
-                        help="風を映す旗の種類。cloth=PBD粒子法の布(既定) / cloth-mesh=布を面で表示 / plate=剛体の板")
+    parser.add_argument("--flag-style", choices=ALL_STYLES, default="cloth-mesh",
+                        help="風を映す旗の種類。cloth-mesh=PBD布の変形メッシュ表示(既定) / cloth=PBD粒子 / plate=剛体板")
     args = parser.parse_args()
 
     gs.init(backend=gs.gpu if args.gpu else gs.cpu)

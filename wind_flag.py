@@ -16,10 +16,10 @@ ALL_STYLES = ("cloth", "cloth-mesh", "plate")
 _CLOTH_VIS_MODE = {"cloth": "particle", "cloth-mesh": "visual"}
 
 
-def legend(style="cloth"):
+def legend(style="cloth-mesh"):
     """旗の見方を簡潔に説明する。"""
     cloth = style in _CLOTH_VIS_MODE
-    kind = "PBD粒子法の布" if cloth else "剛体の板"
+    kind = "PBDソルバーの布" if cloth else "剛体の板"
     return (
         f"白い旗 = 風の見える化({kind}・衝突判定なし): "
         f"垂れ下がる=ほぼ無風 / 持ち上がるほど強風 / "
@@ -298,7 +298,7 @@ class ClothWindFlag:
         self._set_axis("y", acceleration * self._azimuth[1])
 
 
-def wind_flag_scene_kwargs(style="cloth", scale=1.0):
+def wind_flag_scene_kwargs(style="cloth-mesh", scale=1.0):
     """Return optional Genesis scene settings needed by PBD cloth."""
     if style not in _CLOTH_VIS_MODE:
         return {}
@@ -316,7 +316,7 @@ def wind_flag_scene_kwargs(style="cloth", scale=1.0):
     return kwargs
 
 
-def create_wind_flag(scene, base_xy, scale=1.0, n_envs=0, style="cloth"):
+def create_wind_flag(scene, base_xy, scale=1.0, n_envs=0, style="cloth-mesh"):
     """Create the requested flag, falling back to a rigid plate if cloth fails."""
     if style not in ALL_STYLES:
         raise ValueError(f"style must be one of {ALL_STYLES}: {style}")

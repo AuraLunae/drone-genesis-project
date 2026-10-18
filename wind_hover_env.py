@@ -68,7 +68,7 @@ class WindHoverEnv:
         # 既定の視点(上から見下ろす位置)では、後方に立てた旗が画面の外に出てしまうため、
         # 旗を出す時だけ、低めに引いた視点に切り替える。
         show_flag = bool(env_cfg.get("visualize_wind_flag", False))
-        flag_style = env_cfg.get("wind_flag_style", "cloth")     # "cloth"(PBD粒子法の布) / "cloth-mesh" / "plate"
+        flag_style = env_cfg.get("wind_flag_style", "cloth-mesh")  # PBD布を変形メッシュで表示(粒子を表示しない)
         flag_scale = env_cfg.get("wind_flag_scale", 1.3)
         # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
         flag_scene_kwargs = wind_flag_scene_kwargs(flag_style, flag_scale) if show_flag else {}

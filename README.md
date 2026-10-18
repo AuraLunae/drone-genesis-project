@@ -26,24 +26,26 @@ drone-genesis-project/
 ## 風の可視化
 
 評価スクリプトでは、シミュレーション中の風の強さと向きを白い旗で表示します。
-既定はGenesisのPBD粒子布で、布の生成に失敗した場合は衝突判定のない剛体板へ自動で切り替わります。
+既定はGenesisのPBDソルバーで動く布旗を、粒子ではなく変形メッシュとして表示します。支柱は剛体ソルバーを使い、
+布とドローンなどの剛体間の衝突連成を無効にすることで、旗が飛行に干渉しないようにしています。
 旗の表示は評価時だけで、学習の物理や報酬には影響しません。
 
 ```powershell
-# PBD布旗(既定)。--wind-flag も同じオプションとして使えます
+# PBD布旗を変形メッシュで表示(既定)。--wind-flag も同じオプションとして使えます
 uv run python eval.py -e wind-hovering --run latest
 
-# 剛体板の旗を使う
+# PBD粒子を表示する(粒が見えるため、通常は上の既定表示を推奨)
+uv run python eval.py -e wind-hovering --run latest --flag-style cloth
+
+# 変形しない板旗にする
 uv run python eval.py -e wind-hovering --run latest --flag-style plate
 
-# 布を粒子ではなく面として表示する
-uv run python eval.py -e wind-hovering --run latest --flag-style cloth-mesh
-
 # AI・PID・人間の比較アリーナ(旗の種類を指定可能)
-uv run python compare_arena.py --flag-style cloth
+uv run python compare_arena.py
 ```
 
 旗が垂れているとほぼ無風、持ち上がるほど風が強く、旗が向く方向が風下です。
+`cloth-mesh` は布の物理にGenesisのPBDソルバーを使い、描画は変形する面にするため、大きな粒子が並ぶ表示になりません。
 
 
 ## ベースのコード
