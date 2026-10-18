@@ -31,6 +31,9 @@ drone-genesis-project/
 旗の表示は評価時だけで、学習の物理や報酬には影響しません。
 
 ```powershell
+# 10秒間の録画
+uv run python eval.py -e wind-hovering --run latest --record --time 10
+
 # PBD布旗を変形メッシュで表示(既定)。--wind-flag も同じオプションとして使えます
 uv run python eval.py -e wind-hovering --run latest
 
