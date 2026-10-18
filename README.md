@@ -53,7 +53,15 @@ uv run python compare_arena.py
 旗が垂れているとほぼ無風、持ち上がるほど風が強く、旗が向く方向が風下です。
 `cloth-mesh` は布の物理にGenesisのPBDソルバーを使い、描画は変形する面にするため、大きな粒子が並ぶ表示になりません。
 
+##実際の映像
+
+
+<video src="[/out/wind_hover.mp4](https://github.com/user-attachments/assets/07adda19-0d83-4aca-bb67-cf0aac6b2a23)" controls width="600"></video>
+
 
 ## ベースのコード
 * [Genesis world公式 ](https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/examples/drone/hover_train.py)
 * [Qiita WSL2+Ubuntu 24.04でGenesis環境構築～学習までやってみた](https://qiita.com/t_tanno/items/a17f0717d136a4f96da0)
+
+## 動画のURL
+https://github.com/user-attachments/assets/07adda19-0d83-4aca-bb67-cf0aac6b2a23
