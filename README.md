@@ -18,9 +18,32 @@ drone-genesis-project/
 ├── wind_hover_env.py   # 環境定義(公式HoverEnv + OU過程の風 + 拡張報酬)
 ├── train.py             # 学習スクリプト(公式hover_train.pyベース)
 ├── eval.py               # 評価スクリプト(公式hover_eval.pyベース)
+├── wind_flag.py          # 風の強さと向きを表示する旗(布/板)
 ├── pyproject.toml       # uv用の依存関係定義
 └── README.md
 ```
+
+## 風の可視化
+
+評価スクリプトでは、シミュレーション中の風の強さと向きを白い旗で表示します。
+既定はGenesisのPBD粒子布で、布の生成に失敗した場合は衝突判定のない剛体板へ自動で切り替わります。
+旗の表示は評価時だけで、学習の物理や報酬には影響しません。
+
+```powershell
+# PBD布旗(既定)。--wind-flag も同じオプションとして使えます
+uv run python eval.py -e wind-hovering --run latest
+
+# 剛体板の旗を使う
+uv run python eval.py -e wind-hovering --run latest --flag-style plate
+
+# 布を粒子ではなく面として表示する
+uv run python eval.py -e wind-hovering --run latest --flag-style cloth-mesh
+
+# AI・PID・人間の比較アリーナ(旗の種類を指定可能)
+uv run python compare_arena.py --flag-style cloth
+```
+
+旗が垂れているとほぼ無風、持ち上がるほど風が強く、旗が向く方向が風下です。
 
 
 ## ベースのコード

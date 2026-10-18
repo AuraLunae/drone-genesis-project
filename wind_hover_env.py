@@ -36,6 +36,7 @@ from genesis.utils.geom import (
 )
 
 from genesis_compat import PropellerVisual, apply_com_force
+from wind_flag import create_wind_flag, wind_flag_scene_kwargs
 
 
 def gs_rand_float(lower, upper, shape, device):
@@ -63,6 +64,20 @@ class WindHoverEnv:
         self.obs_scales = obs_cfg["obs_scales"]
         self.reward_scales = copy.deepcopy(reward_cfg["reward_scales"])
 
+        # 風の見える化(白い旗)。評価(eval.py)で env_cfg["visualize_wind_flag"]=True にした時だけ出す。
+        # 既定の視点(上から見下ろす位置)では、後方に立てた旗が画面の外に出てしまうため、
+        # 旗を出す時だけ、低めに引いた視点に切り替える。
+        show_flag = bool(env_cfg.get("visualize_wind_flag", False))
+        flag_style = env_cfg.get("wind_flag_style", "cloth")     # "cloth"(PBD粒子法の布) / "cloth-mesh" / "plate"
+        flag_scale = env_cfg.get("wind_flag_scale", 1.3)
+        # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
+        flag_scene_kwargs = wind_flag_scene_kwargs(flag_style, flag_scale) if show_flag else {}
+        viewer_camera = (
+            dict(camera_pos=(4.5, 0.0, 2.2), camera_lookat=(-1.0, 0.0, 1.3), camera_fov=50)
+            if show_flag
+            else dict(camera_pos=(3.0, 0.0, 3.0), camera_lookat=(0.0, 0.0, 1.0), camera_fov=40)
+        )
+
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(dt=self.dt),
             rigid_options=gs.options.RigidOptions(
@@ -74,12 +89,9 @@ class WindHoverEnv:
             vis_options=gs.options.VisOptions(
                 rendered_envs_idx=list(range(self.rendered_env_num)),
             ),
-            viewer_options=gs.options.ViewerOptions(
-                camera_pos=(3.0, 0.0, 3.0),
-                camera_lookat=(0.0, 0.0, 1.0),
-                camera_fov=40,
-            ),
+            viewer_options=gs.options.ViewerOptions(**viewer_camera),
             show_viewer=show_viewer,
+            **flag_scene_kwargs,
         )
 
         self.scene.add_entity(gs.morphs.Plane())
@@ -100,9 +112,12 @@ class WindHoverEnv:
             self.target = None
 
         if self.env_cfg["visualize_camera"]:
-            self.cam = self.scene.add_camera(
-                res=(640, 480), pos=(3.5, 0.0, 2.5), lookat=(0, 0, 0.5), fov=30, GUI=True,
+            record_camera = (
+                dict(pos=(4.5, 0.0, 2.2), lookat=(-1.0, 0.0, 1.3), fov=50)
+                if show_flag
+                else dict(pos=(3.5, 0.0, 2.5), lookat=(0, 0, 0.5), fov=30)
             )
+            self.cam = self.scene.add_camera(res=(640, 480), GUI=True, **record_camera)
 
         self.base_init_pos = torch.tensor(self.env_cfg["base_init_pos"], device=gs.device)
         self.base_init_quat = torch.tensor(self.env_cfg["base_init_quat"], device=gs.device)
@@ -112,7 +127,22 @@ class WindHoverEnv:
             morph=gs.morphs.Drone(file="urdf/drones/cf2x.urdf")
         )
 
+        # 風の強さと向きを映す白い旗(衝突判定なし)。ドローンの後方(カメラの反対側)に立てる。
+        self.wind_flag = (
+            create_wind_flag(
+                self.scene,
+                base_xy=env_cfg.get("wind_flag_xy", (-2.8, 0.0)),
+                scale=flag_scale,
+                n_envs=num_envs,
+                style=flag_style,
+            )
+            if show_flag
+            else None
+        )
+
         self.scene.build(n_envs=num_envs)
+        if self.wind_flag is not None:
+            self.wind_flag.after_build()   # 布の旗は、build の後に支柱へ留める
 
         # ドローンのCOMリンク(風・外乱力を加える対象)
         # 注: Genesis 1.2.3 では DroneEntity.COM_link_idx が未初期化(内部属性
@@ -198,6 +228,9 @@ class WindHoverEnv:
         self.wind_vec = self.wind_vec * clip_scale
 
         apply_com_force(self.drone, self.com_link_idx, self.wind_vec, n_envs=self.num_envs)
+
+        if self.wind_flag is not None:  # 旗は環境0の風を映す(評価時は環境数1)
+            self.wind_flag.update(self.wind_vec[0].detach().cpu().numpy(), self.dt)
 
     def _at_target(self):
         return (
