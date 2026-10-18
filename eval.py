@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--run", type=str, default="latest", help="'latest'、またはタイムスタンプ(run_id)を指定")
     parser.add_argument("--ckpt", type=int, default=None, help="イテレーション番号。省略時はそのランの最新チェックポイント")
     parser.add_argument("-r", "--record", action="store_true", help="Record the rollout to video")
+    parser.add_argument("--no-wind-flag", action="store_true", help="風を表示する旗を非表示にする")
     parser.add_argument(
         "--flag-style",
         "--wind-flag",
@@ -68,7 +69,7 @@ def main():
     env_cfg["visualize_target"] = True
     env_cfg["visualize_camera"] = args.record
     # 風の強さと向きが誰にでも分かるよう、後方に衝突判定のない白い旗を立てる(視点も旗が入る位置になる)
-    env_cfg["visualize_wind_flag"] = True
+    env_cfg["visualize_wind_flag"] = not args.no_wind_flag
     env_cfg["wind_flag_style"] = args.flag_style
     env_cfg["max_visualize_FPS"] = 60
     # 実行時間が学習時のエピソード長(15秒)より長い場合、途中でタイムアウトして初期位置に
@@ -118,6 +119,9 @@ python eval.py -e wind-hovering --run latest
 
 # 録画したい場合
 python eval.py -e wind-hovering --run latest --record
+
+# 旗を非表示にする場合
+python eval.py -e wind-hovering --run latest --no-wind-flag
 
 # 風を旗で可視化(既定で布旗。布が使えない環境では板旗に自動切替)
 python eval.py -e wind-hovering --run latest

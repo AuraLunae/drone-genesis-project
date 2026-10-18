@@ -34,6 +34,9 @@ drone-genesis-project/
 # 10秒間の録画
 uv run python eval.py -e wind-hovering --run latest --record --time 10
 
+# 旗を非表示にする
+uv run python eval.py -e wind-hovering --run latest --no-wind-flag
+
 # PBD布旗を変形メッシュで表示(既定)。--wind-flag も同じオプションとして使えます
 uv run python eval.py -e wind-hovering --run latest
 
