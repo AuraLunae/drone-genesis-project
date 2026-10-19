@@ -12,11 +12,11 @@ G = 9.81
 FULL_SCALE_N = 0.13
 SMOOTHING_S = 0.15
 CALM_N = 0.003
-ALL_STYLES = ("cloth", "cloth-mesh", "plate")
+ALL_STYLES = ("procedural", "cloth", "cloth-mesh", "plate")
 _CLOTH_VIS_MODE = {"cloth": "particle", "cloth-mesh": "visual"}
 
 
-def legend(style="cloth-mesh"):
+def legend(style="procedural"):
     """旗の見方を簡潔に説明する。"""
     cloth = style in _CLOTH_VIS_MODE
     kind = "PBDソルバーの布" if cloth else "剛体の板"
@@ -25,6 +25,26 @@ def legend(style="cloth-mesh"):
         f"垂れ下がる=ほぼ無風 / 持ち上がるほど強風 / "
         f"旗が向く方向=風下(約{FULL_SCALE_N:.2f} N以上でほぼ水平)"
     )
+
+
+def _normalize(vec, default=(1.0, 0.0)):
+    """ゼロ除算を避ける安全な正規化。"""
+    arr = np.asarray(vec, dtype=float)
+    norm = float(np.linalg.norm(arr))
+    if not np.isfinite(norm) or norm < 1e-9:
+        return np.asarray(default, dtype=float)
+    return arr / norm
+
+
+def _wind_to_3d(wind_vec):
+    """風入力を 3 要素 ndarray に変換し、torch.Tensor も安全に扱う。"""
+    if isinstance(wind_vec, torch.Tensor):
+        arr = wind_vec.detach().reshape(-1).cpu().numpy()
+    else:
+        arr = np.asarray(wind_vec, dtype=float).reshape(-1)
+    if arr.size != 3:
+        raise ValueError(f"wind_vec must have 3 elements, got shape {arr.shape}")
+    return arr.astype(float)
 
 
 def matrix_to_quat(rotation):
@@ -64,7 +84,10 @@ def matrix_to_quat(rotation):
             0.25 * s,
         )
     quat = np.array([w, x, y, z], dtype=np.float64)
-    return quat / np.linalg.norm(quat)
+    norm_q = np.linalg.norm(quat)
+    if not np.isfinite(norm_q) or norm_q < 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    return quat / norm_q
 
 
 def flag_pose(azimuth, level, hinge, flag_length, flutter_rad=0.0):
@@ -91,6 +114,108 @@ def _add_pole(scene, base_xy, pole_height, scale):
         ),
         surface=gray,
     )
+
+
+class ProceduralWindFlag:
+    """進行波(Traveling Wave)で動く超軽量・高リアルなプロシージャル旗"""
+
+    def __init__(self, scene, base_xy, scale=1.0, n_envs=0, n_segments=6):
+        self.n_envs = n_envs
+        self.scale = scale
+        self.pole_height = 2.6 * scale
+        self.total_length = 0.85 * scale
+        self.flag_height = 0.45 * scale
+        self.n_segments = n_segments
+        self.seg_length = self.total_length / max(1, n_segments)
+        self.hinge = np.array([base_xy[0], base_xy[1], self.pole_height], dtype=float)
+
+        self._azimuth = np.array([1.0, 0.0], dtype=float)
+        self._level = 0.0
+        self._time = 0.0
+        self.strength = 0.0
+        self.style = "procedural"
+
+        _add_pole(scene, base_xy, self.pole_height, scale)
+
+        white = gs.surfaces.Rough(diffuse_texture=gs.textures.ColorTexture(color=(0.96, 0.96, 0.96)))
+        self.segments = []
+        for _ in range(n_segments):
+            seg = scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=(base_xy[0], base_xy[1], self.pole_height),
+                    size=(self.seg_length * 1.03, 0.006 * scale, self.flag_height),
+                    fixed=False,
+                    collision=False,
+                ),
+                surface=white,
+            )
+            self.segments.append(seg)
+
+    def after_build(self):
+        pass
+
+    def update(self, wind_vec, dt):
+        """現在の風ベクトル[N]を受けて旗の形状・姿勢を更新する"""
+        wind = _wind_to_3d(wind_vec)
+        self.strength = float(np.linalg.norm(wind))
+        self._time += float(dt)
+
+        horizontal = wind[:2]
+        horizontal_norm = float(np.linalg.norm(horizontal))
+        if self.strength > CALM_N and horizontal_norm > 1e-9:
+            self._azimuth = _normalize(horizontal, default=(1.0, 0.0))
+
+        target_level = min(self.strength / FULL_SCALE_N, 1.0)
+        self._level += (target_level - self._level) * min(1.0, dt / SMOOTHING_S)
+
+        base_pitch = math.radians(-75.0 + 145.0 * (self._level ** 0.8))
+        yaw_angle = math.atan2(self._azimuth[1], self._azimuth[0])
+
+        wave_freq = 2.5 + 4.5 * self._level
+        k = 2.0 * math.pi / (0.45 * self.total_length)
+        max_amplitude = math.radians(22.0 * self._level)
+
+        curr_pos = self.hinge.copy()
+        device = getattr(gs, "device", torch.device("cpu"))
+
+        for i, seg in enumerate(self.segments):
+            x_rel = (i + 0.5) * self.seg_length
+            amp_factor = (x_rel / self.total_length) ** 1.3
+            phase = k * x_rel - 2.0 * math.pi * wave_freq * self._time
+            wave_angle = max_amplitude * amp_factor * math.sin(phase)
+
+            seg_pitch = base_pitch + wave_angle * 0.4
+            seg_yaw = yaw_angle + wave_angle * 0.8
+
+            cy, sy = math.cos(seg_yaw * 0.5), math.sin(seg_yaw * 0.5)
+            cp, sp = math.cos(seg_pitch * 0.5), math.sin(seg_pitch * 0.5)
+            quat = np.array([cp * cy, -sp * sy, sp * cy, cp * sy], dtype=np.float64)
+            quat_norm = float(np.linalg.norm(quat))
+            if not np.isfinite(quat_norm) or quat_norm < 1e-9:
+                quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+            else:
+                quat /= quat_norm
+
+            dir_vec = np.array(
+                [
+                    math.cos(seg_pitch) * math.cos(seg_yaw),
+                    math.cos(seg_pitch) * math.sin(seg_yaw),
+                    math.sin(seg_pitch),
+                ],
+                dtype=np.float64,
+            )
+            seg_center = curr_pos + dir_vec * (self.seg_length * 0.5)
+            curr_pos += dir_vec * self.seg_length
+
+            if self.n_envs > 0:
+                center_arr = np.tile(seg_center, (self.n_envs, 1))
+                quat_arr = np.tile(quat, (self.n_envs, 1))
+            else:
+                center_arr = seg_center
+                quat_arr = quat
+
+            seg.set_pos(torch.as_tensor(center_arr, dtype=torch.float32, device=device), zero_velocity=True)
+            seg.set_quat(torch.as_tensor(quat_arr, dtype=torch.float32, device=device), zero_velocity=True)
 
 
 class PlateWindFlag:
@@ -127,14 +252,14 @@ class PlateWindFlag:
 
     def update(self, wind_vec, dt):
         """Apply the current force vector [N] to the flag visualization."""
-        wind = np.asarray(wind_vec, dtype=float).reshape(3)
+        wind = _wind_to_3d(wind_vec)
         self.strength = float(np.linalg.norm(wind))
         self._time += dt
 
         horizontal = wind[:2]
         horizontal_norm = float(np.linalg.norm(horizontal))
         if self.strength > CALM_N and horizontal_norm > 1e-9:
-            self._azimuth = horizontal / horizontal_norm
+            self._azimuth = _normalize(horizontal, default=(1.0, 0.0))
 
         target_level = min(self.strength / FULL_SCALE_N, 1.0)
         self._level += (target_level - self._level) * min(1.0, dt / SMOOTHING_S)
@@ -144,12 +269,15 @@ class PlateWindFlag:
         if self.n_envs > 0:
             center = np.tile(center, (self.n_envs, 1))
             quat = np.tile(quat, (self.n_envs, 1))
-        self.flag.set_pos(torch.as_tensor(center, dtype=torch.float32, device=gs.device), zero_velocity=True)
-        self.flag.set_quat(torch.as_tensor(quat, dtype=torch.float32, device=gs.device), zero_velocity=True)
+        device = getattr(gs, "device", torch.device("cpu"))
+        self.flag.set_pos(torch.as_tensor(center, dtype=torch.float32, device=device), zero_velocity=True)
+        self.flag.set_quat(torch.as_tensor(quat, dtype=torch.float32, device=device), zero_velocity=True)
 
 
 def write_flag_mesh(path, length, width, nx, nz):
     """Write a vertical rectangular OBJ cloth mesh."""
+    if nx < 2 or nz < 2:
+        raise ValueError("nx and nz must be >= 2 to generate a mesh")
     lines = []
     for iz in range(nz):
         z = -width * iz / (nz - 1)
@@ -176,6 +304,8 @@ class WindBank:
     """Approximate continuous acceleration using on/off force fields in binary weights."""
 
     def __init__(self, a_max, bits):
+        if bits < 1:
+            raise ValueError("WindBank.bits must be >= 1")
         self.bits = bits
         self.levels = 2**bits - 1
         self.step = a_max / self.levels
@@ -276,13 +406,13 @@ class ClothWindFlag:
 
     def update(self, wind_vec, dt):
         """Apply the current force vector [N] to the cloth visualization."""
-        wind = np.asarray(wind_vec, dtype=float).reshape(3)
+        wind = _wind_to_3d(wind_vec)
         self.strength = float(np.linalg.norm(wind))
         self._time += dt
         horizontal = wind[:2]
         horizontal_norm = float(np.linalg.norm(horizontal))
         if self.strength > CALM_N and horizontal_norm > 1e-9:
-            self._azimuth = horizontal / horizontal_norm
+            self._azimuth = _normalize(horizontal, default=(1.0, 0.0))
 
         target_level = min(self.strength / FULL_SCALE_N, 1.0)
         self._level += (target_level - self._level) * min(1.0, dt / SMOOTHING_S)
@@ -298,8 +428,10 @@ class ClothWindFlag:
         self._set_axis("y", acceleration * self._azimuth[1])
 
 
-def wind_flag_scene_kwargs(style="cloth-mesh", scale=1.0):
+def wind_flag_scene_kwargs(style="procedural", scale=1.0):
     """Return optional Genesis scene settings needed by PBD cloth."""
+    if style == "procedural":
+        return {}
     if style not in _CLOTH_VIS_MODE:
         return {}
     kwargs = {}
@@ -316,10 +448,12 @@ def wind_flag_scene_kwargs(style="cloth-mesh", scale=1.0):
     return kwargs
 
 
-def create_wind_flag(scene, base_xy, scale=1.0, n_envs=0, style="cloth-mesh"):
+def create_wind_flag(scene, base_xy, scale=1.0, n_envs=0, style="procedural"):
     """Create the requested flag, falling back to a rigid plate if cloth fails."""
     if style not in ALL_STYLES:
         raise ValueError(f"style must be one of {ALL_STYLES}: {style}")
+    if style == "procedural":
+        return ProceduralWindFlag(scene, base_xy, scale=scale, n_envs=n_envs)
     if style in _CLOTH_VIS_MODE:
         try:
             return ClothWindFlag(scene, base_xy, scale=scale, n_envs=n_envs, style=style)
