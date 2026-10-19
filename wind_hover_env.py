@@ -1,26 +1,4 @@
-"""
-WindHoverEnv: Genesis World公式の examples/drone/hover_env.py (HoverEnv) をベースに、
-OU過程(Ornstein-Uhlenbeck process)による時間変化する風外乱を追加した環境。
-
-ベースにした公式コード:
-  https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/examples/drone/hover_env.py
-
-変更点(公式HoverEnvとの差分):
-  1. 風パラメータ(wind_mean/theta/sigma/vec)をバッチテンソルとして追加
-  2. reset_idx()で風パラメータをエピソードごとに再抽選(コマンドの再抽選と同じタイミング)
-  3. step()で scene.step() の直前に、ドローンのCOMリンクへOU過程の風力を加える
-  4. reset_idx()で初期位置を base_init_pos 周辺でランダム化(ドメインランダム化)
-
-観測は公式HoverEnvと同一(風の情報は観測に含めない。風を直接観測させず、姿勢の乱れから
-間接的に対処させることで、ロバスト性を狙う)。報酬・終了条件は、これまでの検討で拡張している
-(報酬は train.py の reward_cfg、終了条件は env_cfg を参照)。
-
-Genesisの版について:
-  Genesis 1.2.3 には「差動RPMがロール/ピッチのトルクを生まない」不具合があり、この環境では
-  機体を傾けられず水平移動ができない(verify_physics.py のテスト4で実測確認)。
-  genesis-world>=1.4.1 を使うこと(pyproject.toml で下限を固定している)。
-  版によって異なる外力APIなどは genesis_compat.py に集約してあり、この環境はそこを経由する。
-"""
+"""Wind hover environment with OU wind disturbances."""
 
 import torch
 import math
@@ -68,7 +46,8 @@ class WindHoverEnv:
         # 既定の視点(上から見下ろす位置)では、後方に立てた旗が画面の外に出てしまうため、
         # 旗を出す時だけ、低めに引いた視点に切り替える。
         show_flag = bool(env_cfg.get("visualize_wind_flag", False))
-        flag_style = env_cfg.get("wind_flag_style", "cloth-mesh")  # PBD布を変形メッシュで表示(粒子を表示しない)
+        # デフォルトを procedural に切り替え
+        flag_style = env_cfg.get("wind_flag_style", "procedural")  # procedural が既定
         flag_scale = env_cfg.get("wind_flag_scale", 1.3)
         # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
         flag_scene_kwargs = wind_flag_scene_kwargs(flag_style, flag_scale) if show_flag else {}
@@ -234,7 +213,7 @@ class WindHoverEnv:
 
     def _at_target(self):
         return (
-            (torch.norm(self.rel_pos, dim=1) < self.env_cfg["at_target_threshold"])
+            (torch.norm(self.rel_pos, dim=1) < self.env_cfg["at_target_threshold"]) 
             .nonzero(as_tuple=False)
             .reshape((-1,))
         )
@@ -275,11 +254,11 @@ class WindHoverEnv:
         self._resample_commands(envs_idx)
 
         self.crash_condition = (
-            (torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"])
-            | (torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"])
-            | (torch.abs(self.rel_pos[:, 0]) > self.env_cfg["termination_if_x_greater_than"])
-            | (torch.abs(self.rel_pos[:, 1]) > self.env_cfg["termination_if_y_greater_than"])
-            | (torch.abs(self.rel_pos[:, 2]) > self.env_cfg["termination_if_z_greater_than"])
+            (torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"]) 
+            | (torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"]) 
+            | (torch.abs(self.rel_pos[:, 0]) > self.env_cfg["termination_if_x_greater_than"]) 
+            | (torch.abs(self.rel_pos[:, 1]) > self.env_cfg["termination_if_y_greater_than"]) 
+            | (torch.abs(self.rel_pos[:, 2]) > self.env_cfg["termination_if_z_greater_than"]) 
             | (self.base_pos[:, 2] < self.env_cfg["termination_if_close_to_ground"])
         )
 
