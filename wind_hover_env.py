@@ -68,7 +68,7 @@ class WindHoverEnv:
         # 既定の視点(上から見下ろす位置)では、後方に立てた旗が画面の外に出てしまうため、
         # 旗を出す時だけ、低めに引いた視点に切り替える。
         show_flag = bool(env_cfg.get("visualize_wind_flag", False))
-        flag_style = env_cfg.get("wind_flag_style", "cloth-mesh")  # PBD布を変形メッシュで表示(粒子を表示しない)
+        flag_style = env_cfg.get("wind_flag_style", "procedural")  # 進行波で動く分割旗(PBD不要・軽量)
         flag_scale = env_cfg.get("wind_flag_scale", 1.3)
         # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
         flag_scene_kwargs = wind_flag_scene_kwargs(flag_style, flag_scale) if show_flag else {}
@@ -142,7 +142,7 @@ class WindHoverEnv:
 
         self.scene.build(n_envs=num_envs)
         if self.wind_flag is not None:
-            self.wind_flag.after_build()   # 布の旗は、build の後に支柱へ留める
+            self.wind_flag.after_build()  # 布の旗は、build の後に支柱へ留める
 
         # ドローンのCOMリンク(風・外乱力を加える対象)
         # 注: Genesis 1.2.3 では DroneEntity.COM_link_idx が未初期化(内部属性

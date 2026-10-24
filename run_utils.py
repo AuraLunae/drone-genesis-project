@@ -12,9 +12,16 @@ run_id はラン開始時刻から生成するタイムスタンプ("YYYYMMDD_HH
 上書き・削除することは構造的に起こらない。
 """
 
+import atexit
 import glob
 import os
 import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
 from datetime import datetime
 
 
@@ -95,3 +102,57 @@ def resolve_resume_target(resume_arg: str, exp_name: str, logs_root: str = "logs
         return run_dir, ckpt_path
 
     raise FileNotFoundError(f"--resume に指定されたパスが見つかりません: {resume_arg}")
+
+
+# ---------------------------------------------------------------------- #
+# TensorBoardの自動起動
+# ---------------------------------------------------------------------- #
+def find_free_port(start=6006, tries=20):
+    """start以降で、誰も使っていない最初のポートを返す(前回のTensorBoardが残っていても衝突しない)"""
+    for port in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            if sock.connect_ex(("127.0.0.1", port)) != 0:  # 接続できない = 空いている
+                return port
+    raise RuntimeError(f"{start}〜{start + tries - 1} のポートが全て使用中です。")
+
+
+def launch_tensorboard(logdir, port=6006, open_browser=True):
+    """TensorBoardをバックグラウンドで起動し、準備ができたらブラウザで開く。
+
+    `tensorboard`コマンドは --logdir が必須でオプション無しでは起動できないため、
+    学習スクリプト(train.py)や tb.py から、このプロジェクトのログ置き場を指定して自動で立ち上げる。
+    起動したプロセスは、呼び出し元のスクリプトが終了する時に自動で停止する。
+    戻り値: (プロセス, URL)
+    """
+    port = find_free_port(port)
+    url = f"http://localhost:{port}"
+    process = subprocess.Popen(
+        [sys.executable, "-m", "tensorboard.main", "--logdir", logdir, "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    def _stop():
+        if process.poll() is None:
+            process.terminate()
+
+    atexit.register(_stop)
+
+    def _wait_and_open():
+        # 起動完了(ポートが応答する)まで最大30秒待ってからブラウザを開く
+        for _ in range(60):
+            if process.poll() is not None:
+                print("\n[警告] TensorBoardが起動できませんでした(tensorboardが未導入の可能性)。")
+                return
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.3)
+                if sock.connect_ex(("127.0.0.1", port)) == 0:
+                    if open_browser:
+                        webbrowser.open(url)
+                    return
+            time.sleep(0.5)
+
+    threading.Thread(target=_wait_and_open, daemon=True).start()
+    print(f"=== TensorBoard: {url} (ログ: {logdir}) ===")
+    return process, url

@@ -319,8 +319,8 @@ def main():
     parser.add_argument("--no-wind", action="store_true", help="風を無効にする")
     parser.add_argument("--gpu", action="store_true", help="GPUで実行する(既定はCPU。3機だけなのでCPUで十分)")
     parser.add_argument("--no-prop-fix", action="store_true", help="プロペラ回転の表示補正を無効にする")
-    parser.add_argument("--flag-style", choices=ALL_STYLES, default="cloth-mesh",
-                        help="風を映す旗の種類。cloth-mesh=PBD布の変形メッシュ表示(既定) / cloth=PBD粒子 / plate=剛体板")
+    parser.add_argument("--flag-style", choices=ALL_STYLES, default="procedural",
+                        help="風を映す旗の種類。procedural=進行波の分割旗(既定) / cloth-mesh=PBD布の変形メッシュ / cloth=PBD粒子 / plate=剛体板")
     args = parser.parse_args()
 
     gs.init(backend=gs.gpu if args.gpu else gs.cpu)
@@ -356,7 +356,7 @@ def main():
             run_in_thread=False,
         ),
         show_viewer=True,
-        **wind_flag_scene_kwargs(args.flag_style, WIND_FLAG_SCALE),   # 布の旗用: 布と機体・地面の連成を切るなど
+        **wind_flag_scene_kwargs(args.flag_style, WIND_FLAG_SCALE),  # 布の旗用: 布と機体・地面の連成を切るなど
     )
     scene.add_entity(gs.morphs.Plane())
 
@@ -372,7 +372,7 @@ def main():
         )
     wind_flag = create_wind_flag(scene, base_xy=WIND_FLAG_XY, scale=WIND_FLAG_SCALE, style=args.flag_style)
     scene.build()
-    wind_flag.after_build()   # 布の旗は、build の後に支柱へ留める
+    wind_flag.after_build()  # 布の旗は、build の後に支柱へ留める
 
     contestants = [Contestant(k, drones[k], markers[k], not args.no_prop_fix) for k in keys]
     by_key = {c.key: c for c in contestants}

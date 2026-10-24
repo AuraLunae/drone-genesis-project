@@ -45,11 +45,11 @@ def main():
         "--wind-flag",
         dest="flag_style",
         nargs="?",
-        const="cloth-mesh",
+        const="procedural",
         choices=ALL_STYLES,
-        default="cloth-mesh",
-        metavar="{cloth,cloth-mesh,plate}",
-        help="風を映す旗。既定はPBD布の変形メッシュ表示。clothは粒子表示、plateは剛体板",
+        default="procedural",
+        metavar="{procedural,cloth,cloth-mesh,plate}",
+        help="風を映す旗。既定はprocedural(進行波の分割旗)。cloth=PBD粒子 / cloth-mesh=PBD変形メッシュ / plate=剛体板",
     )
     parser.add_argument("-t", "--time", dest="duration", type=float, default=60.0,
                         help="実行時間[秒]。既定60秒(旧版は約9秒だった)。録画時もこの長さになる")
