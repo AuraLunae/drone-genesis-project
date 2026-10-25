@@ -93,3 +93,29 @@ class PropellerVisual:
         rpm_tensor = rpm_tensor.reshape(-1, 1) if rpm_tensor.ndim == 1 else rpm_tensor.T
         self._revs = (self._revs + rpm_tensor * self.VISUAL_SCALE) % self._wrap
         revs.copy_(self._revs)
+
+
+# ---------------------------------------------------------------------- #
+# 床の反射(評価・アリーナ用の見た目だけ。物理には影響しない)
+# ---------------------------------------------------------------------- #
+FLOOR_ROUGHNESS = 0.55  # 小さいほど鏡に近い。若干の反射にするため、やや大きめ(暫定値。実機で見て調整)
+
+
+def reflective_vis_options(**kwargs):
+    """床の反射を有効にした VisOptions を作る(plane_reflection が無い版では、無しで作る)。"""
+    try:
+        return gs.options.VisOptions(plane_reflection=True, **kwargs)
+    except TypeError:
+        print("[注意] この版の VisOptions には plane_reflection がないため、床の反射なしで続けます")
+        return gs.options.VisOptions(**kwargs)
+
+
+def add_floor(scene, reflective=True):
+    """床(Plane)を足す。reflective=True なら、若干つやのある床にする(通らなければ通常の床)。"""
+    if reflective:
+        try:
+            surface = gs.surfaces.Default(color=(0.92, 0.92, 0.94, 1.0), roughness=FLOOR_ROUGHNESS)
+            return scene.add_entity(gs.morphs.Plane(), surface=surface)
+        except (TypeError, AttributeError) as e:
+            print(f"[注意] 床の表面設定が通らないため、通常の床にします: {e}")
+    return scene.add_entity(gs.morphs.Plane())

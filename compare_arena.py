@@ -55,7 +55,7 @@ from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 from arena_scoring import ContestantScore, FailureRules, ScoringConfig, generate_waypoints, rank
-from genesis_compat import PropellerVisual, apply_com_force
+from genesis_compat import PropellerVisual, apply_com_force, add_floor, reflective_vis_options
 from manual_pid_fly import (
     BASE_RPM,
     DT,
@@ -80,10 +80,12 @@ COUNTDOWN_S = 3.0
 MAX_ABS_RPM = 25000.0
 AI_RPM_SCALE = 0.8  # wind_hover_env.py の step() と同じ: rpm = (1 + action * 0.8) * BASE_RPM
 RESULTS_DIR = os.path.join("logs", "arena")
-# 風を映す白い旗(衝突判定なし)。カメラ(y=-8から+y方向を見る)の反対側、つまり3機の後方(背景側)に立てる。
-# カメラから遠い(約11.5 m)ので、eval.py(約7 m)より大きくしてある。
+# 風を映す白い旗(衝突判定なし)。カメラ(y=-6から+y方向を見る)の反対側、つまり3機の後方(背景側)に立てる。
+# カメラから遠い(水平で約9.5 m)ので、eval.py(約6.7 m)より大きくしてある。
 WIND_FLAG_XY = (0.0, 3.5)
 WIND_FLAG_SCALE = 1.6
+# 旗が最初に伸びる向き。カメラは-y側から+y方向を見るので、広い面が見えるよう、最初はx方向へ伸ばす
+WIND_FLAG_ALONG = (1.0, 0.0)
 NO_WIND = np.zeros(3)
 
 # 状態
@@ -319,9 +321,15 @@ def main():
     parser.add_argument("--no-wind", action="store_true", help="風を無効にする")
     parser.add_argument("--gpu", action="store_true", help="GPUで実行する(既定はCPU。3機だけなのでCPUで十分)")
     parser.add_argument("--no-prop-fix", action="store_true", help="プロペラ回転の表示補正を無効にする")
-    parser.add_argument("--flag-style", choices=ALL_STYLES, default="procedural",
-                        help="風を映す旗の種類。procedural=進行波の分割旗(既定) / cloth-mesh=PBD布の変形メッシュ / cloth=PBD粒子 / plate=剛体板")
+    parser.add_argument("--flag-style", choices=ALL_STYLES, default=None,
+                        help="風を映す旗の種類。surface=式で形を計算するスプライン曲面(既定) / cloth-mesh=PBD布 / cloth=PBD粒子 / "
+                             "cloth-vel=PBD布(粒子の速度に風を足す方式) / plate=剛体板")
+    parser.add_argument("--pbd", action="store_true",
+                        help="旗をPBD布の物理計算にする(--flag-style cloth-mesh の短縮形)")
     args = parser.parse_args()
+    if args.pbd and args.flag_style not in (None, "cloth-mesh"):
+        parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
+    args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or "surface")
 
     gs.init(backend=gs.gpu if args.gpu else gs.cpu)
 
@@ -347,10 +355,10 @@ def main():
             enable_joint_limit=True,
             constraint_solver=gs.constraint_solver.Newton,
         ),
-        vis_options=gs.options.VisOptions(show_world_frame=False),
+        vis_options=reflective_vis_options(show_world_frame=False),  # 床を若干反射させる
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -8.0, 2.5),
-            camera_lookat=(0.0, 0.0, 1.0),
+            camera_pos=(0.0, -6.0, 2.0),
+            camera_lookat=(0.0, 0.0, 1.2),
             camera_fov=50,
             realtime_factor=1.0,
             run_in_thread=False,
@@ -358,7 +366,7 @@ def main():
         show_viewer=True,
         **wind_flag_scene_kwargs(args.flag_style, WIND_FLAG_SCALE),  # 布の旗用: 布と機体・地面の連成を切るなど
     )
-    scene.add_entity(gs.morphs.Plane())
+    add_floor(scene)
 
     keys = (["AI"] if ai else []) + ["PID", "HUMAN"]
     drones, markers = {}, {}
@@ -370,7 +378,8 @@ def main():
             morph=gs.morphs.Mesh(file="meshes/sphere.obj", scale=0.06, fixed=False, collision=False),
             surface=gs.surfaces.Rough(diffuse_texture=gs.textures.ColorTexture(color=MARKER_COLORS[key])),
         )
-    wind_flag = create_wind_flag(scene, base_xy=WIND_FLAG_XY, scale=WIND_FLAG_SCALE, style=args.flag_style)
+    wind_flag = create_wind_flag(scene, base_xy=WIND_FLAG_XY, scale=WIND_FLAG_SCALE, style=args.flag_style,
+                                 along=WIND_FLAG_ALONG)
     scene.build()
     wind_flag.after_build()  # 布の旗は、build の後に支柱へ留める
 

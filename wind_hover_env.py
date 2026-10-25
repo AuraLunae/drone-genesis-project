@@ -35,7 +35,7 @@ from genesis.utils.geom import (
     transform_quat_by_quat,
 )
 
-from genesis_compat import PropellerVisual, apply_com_force
+from genesis_compat import PropellerVisual, apply_com_force, add_floor, reflective_vis_options
 from wind_flag import create_wind_flag, wind_flag_scene_kwargs
 
 
@@ -66,14 +66,14 @@ class WindHoverEnv:
 
         # 風の見える化(白い旗)。評価(eval.py)で env_cfg["visualize_wind_flag"]=True にした時だけ出す。
         # 既定の視点(上から見下ろす位置)では、後方に立てた旗が画面の外に出てしまうため、
-        # 旗を出す時だけ、低めに引いた視点に切り替える。
+        # 旗を出す時だけ、低めの視点に切り替える。旗は奥(x=-4.5)に置き、ドローンを大きく映す。
         show_flag = bool(env_cfg.get("visualize_wind_flag", False))
-        flag_style = env_cfg.get("wind_flag_style", "procedural")  # 進行波で動く分割旗(PBD不要・軽量)
-        flag_scale = env_cfg.get("wind_flag_scale", 1.3)
+        flag_style = env_cfg.get("wind_flag_style", "surface")  # 式で形を計算するスプライン曲面(失敗時はPBD布→板)
+        flag_scale = env_cfg.get("wind_flag_scale", 1.2)
         # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
         flag_scene_kwargs = wind_flag_scene_kwargs(flag_style, flag_scale) if show_flag else {}
         viewer_camera = (
-            dict(camera_pos=(4.5, 0.0, 2.2), camera_lookat=(-1.0, 0.0, 1.3), camera_fov=50)
+            dict(camera_pos=(2.2, 0.0, 1.5), camera_lookat=(-1.0, 0.0, 1.5), camera_fov=45)
             if show_flag
             else dict(camera_pos=(3.0, 0.0, 3.0), camera_lookat=(0.0, 0.0, 1.0), camera_fov=40)
         )
@@ -86,7 +86,8 @@ class WindHoverEnv:
                 enable_joint_limit=True,
                 constraint_solver=gs.constraint_solver.Newton,
             ),
-            vis_options=gs.options.VisOptions(
+            # 旗を出す時(評価)だけ、床を若干反射させる(見た目だけ。物理には影響しない)
+            vis_options=(reflective_vis_options if show_flag else gs.options.VisOptions)(
                 rendered_envs_idx=list(range(self.rendered_env_num)),
             ),
             viewer_options=gs.options.ViewerOptions(**viewer_camera),
@@ -94,7 +95,7 @@ class WindHoverEnv:
             **flag_scene_kwargs,
         )
 
-        self.scene.add_entity(gs.morphs.Plane())
+        add_floor(self.scene, reflective=show_flag)
 
         if self.env_cfg["visualize_target"]:
             self.target = self.scene.add_entity(
@@ -113,7 +114,7 @@ class WindHoverEnv:
 
         if self.env_cfg["visualize_camera"]:
             record_camera = (
-                dict(pos=(4.5, 0.0, 2.2), lookat=(-1.0, 0.0, 1.3), fov=50)
+                dict(pos=(2.2, 0.0, 1.5), lookat=(-1.0, 0.0, 1.5), fov=45)
                 if show_flag
                 else dict(pos=(3.5, 0.0, 2.5), lookat=(0, 0, 0.5), fov=30)
             )
@@ -131,10 +132,12 @@ class WindHoverEnv:
         self.wind_flag = (
             create_wind_flag(
                 self.scene,
-                base_xy=env_cfg.get("wind_flag_xy", (-2.8, 0.0)),
+                base_xy=env_cfg.get("wind_flag_xy", (-4.5, 0.0)),
                 scale=flag_scale,
                 n_envs=num_envs,
                 style=flag_style,
+                # 視点は+x側から-x方向を見る。旗の広い面が見えるよう、最初はy方向へ伸ばす
+                along=env_cfg.get("wind_flag_along", (0.0, 1.0)),
             )
             if show_flag
             else None
@@ -271,8 +274,22 @@ class WindHoverEnv:
         self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
         self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
 
-        envs_idx = self._at_target()
-        self._resample_commands(envs_idx)
+        # ゴールの引き直し。goal_mode で2通り(同じモデルで両方動かせる):
+        #   "hover"(既定): ゴールは一定時間(resampling_time_s)ごとに変わる。触れても変わらない
+        #                   → ゴールの位置で滞空し続けるほど報酬が増える(本来のコンセプト)
+        #   "touch"       : ゴールに触れた(at_target_threshold以内)瞬間に変わる
+        #                   → 触れて次のゴールへ、を繰り返す(eval.py --touch)
+        if self.env_cfg.get("goal_mode", "hover") == "touch":
+            envs_idx = self._at_target()
+        else:
+            interval = max(1, int(round(self.env_cfg["resampling_time_s"] / self.dt)))
+            envs_idx = (self.episode_length_buf % interval == 0).nonzero(as_tuple=False).reshape((-1,))
+        if len(envs_idx) > 0:
+            self._resample_commands(envs_idx)
+            # 新しいゴールに対する相対位置に更新する(古いゴールのままだと、観測が1ステップ古く、
+            # ゴールが飛んだ分が進歩報酬に混ざる)。ゴールが飛んだステップの進歩報酬は0にする
+            self.rel_pos[envs_idx] = self.commands[envs_idx] - self.base_pos[envs_idx]
+            self.last_rel_pos[envs_idx] = self.rel_pos[envs_idx]
 
         self.crash_condition = (
             (torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"])

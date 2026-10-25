@@ -9,6 +9,9 @@ WindHoverEnv の評価スクリプト。
   # 実行時間を変える(秒)
   python eval.py --time 120
 
+  # 風なしで、ゴールを次々にタッチしていく(タッチするたびに次のゴールが出る)
+  python eval.py --touch
+
   # 特定のランの特定チェックポイントを評価
   python eval.py -e wind-hovering --run 20261004_120000 --ckpt 300
 """
@@ -45,15 +48,24 @@ def main():
         "--wind-flag",
         dest="flag_style",
         nargs="?",
-        const="procedural",
+        const="surface",
         choices=ALL_STYLES,
-        default="procedural",
-        metavar="{procedural,cloth,cloth-mesh,plate}",
-        help="風を映す旗。既定はprocedural(進行波の分割旗)。cloth=PBD粒子 / cloth-mesh=PBD変形メッシュ / plate=剛体板",
+        default=None,  # 未指定なら surface(--pbd が付けば cloth-mesh)
+        metavar="{surface,cloth-mesh,cloth,cloth-vel,plate}",
+        help="風を映す旗。既定は式で形を計算するスプライン曲面。cloth-meshはPBD布、clothは粒子表示、"
+             "cloth-velはPBD布(粒子の速度に風を足す方式)、plateは剛体板",
     )
+    parser.add_argument("--pbd", action="store_true",
+                        help="旗をPBD布の物理計算にする(--flag-style cloth-mesh の短縮形)")
     parser.add_argument("-t", "--time", dest="duration", type=float, default=60.0,
                         help="実行時間[秒]。既定60秒(旧版は約9秒だった)。録画時もこの長さになる")
+    parser.add_argument("--touch", action="store_true",
+                        help="タッチチャレンジ(同じモデルで動く): 風なしで、ゴール(赤い球)にタッチすると次のゴールが出る。"
+                             "タッチ回数と間隔を表示する")
     args = parser.parse_args()
+    if args.pbd and args.flag_style not in (None, "cloth-mesh"):
+        parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
+    args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or "surface")
 
     gs.init(backend=gs.cpu)
 
@@ -66,11 +78,19 @@ def main():
         env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg, train_cfg = pickle.load(f)
 
     reward_cfg["reward_scales"] = {}
+    if args.touch:
+        # 風なし: 風の強さ・乱れを0にする(旗は垂れ下がったままになる)
+        wind_cfg = dict(wind_cfg, strength_range=[0.0, 0.0], sigma_range=[0.0, 0.0])
+        # 触れた瞬間にゴールが変わるルールにする(学習時の既定は、時間でゴールが変わる"hover")。
+        # 観測は「ゴールまでの相対位置」だけなので、同じモデルがそのまま使える
+        env_cfg["goal_mode"] = "touch"
     env_cfg["visualize_target"] = True
     env_cfg["visualize_camera"] = args.record
     # 風の強さと向きが誰にでも分かるよう、後方に衝突判定のない白い旗を立てる(視点も旗が入る位置になる)
     env_cfg["visualize_wind_flag"] = not args.no_wind_flag
     env_cfg["wind_flag_style"] = args.flag_style
+    env_cfg["wind_flag_xy"] = (-4.5, 0.0)   # 旗は奥に置く(遠近法で小さく見える)
+    env_cfg["wind_flag_scale"] = 1.2
     env_cfg["max_visualize_FPS"] = 60
     # 実行時間が学習時のエピソード長(15秒)より長い場合、途中でタイムアウトして初期位置に
     # 戻されないよう、エピソード長も実行時間に合わせて延ばす(墜落・範囲外では従来通りリセットされる)
@@ -97,17 +117,76 @@ def main():
     # 実行時間[秒]をシミュレーションのステップ数に変換する(1ステップ = env.dt = 0.01秒)
     max_sim_step = int(args.duration / env.dt)
 
+    touch = TouchCounter(env.dt) if args.touch else None
+    if touch:
+        print("=== タッチチャレンジ(風なし)。ゴールにタッチすると次のゴールが出ます ===")
+
+    def step_once(obs_dict):
+        before = env.commands[0].clone() if touch else None
+        actions = policy(obs_dict)
+        obs_dict, rews, dones, infos = env.step(actions)
+        if touch:
+            touch.observe(before, env.commands[0], bool(dones[0]), float(env.rel_pos[0].norm()))
+        return obs_dict
+
     with torch.no_grad():
         if args.record:
             env.cam.start_recording(save_to_filename="out/wind_hover.mp4", fps=env_cfg["max_visualize_FPS"])
             for _ in range(max_sim_step):
-                actions = policy(obs_dict)
-                obs_dict, rews, dones, infos = env.step(actions)
+                obs_dict = step_once(obs_dict)
             env.cam.stop_recording()
         else:
             for _ in range(max_sim_step):
-                actions = policy(obs_dict)
-                obs_dict, rews, dones, infos = env.step(actions)
+                obs_dict = step_once(obs_dict)
+    if touch:
+        touch.summary()
+
+
+class TouchCounter:
+    """タッチ回数の集計。env.step() の前後でゴールが変わったら「タッチした」とみなす。
+
+    goal_mode="touch" の WindHoverEnv は、機体がゴールの at_target_threshold(既定0.1 m)以内に入ると、
+    同じステップでゴールを新しい位置に引き直す。そのため、ゴールが変わった = タッチ。
+    ただし、墜落などのリセット(dones)でもゴールは引き直されるので、その場合は数えない。
+    """
+
+    NEAR_M = 0.2   # この距離[m]以内で、タッチ(0.1 m)せずにいた時間を「待機」として数える
+
+    def __init__(self, dt):
+        self.dt = dt
+        self.near_steps = 0
+        self.steps = 0
+        self.last_touch_step = 0
+        self.count = 0
+        self.crashes = 0
+        self.intervals = []
+
+    def observe(self, before, after, done, dist=None):
+        self.steps += 1
+        if done:
+            self.crashes += 1
+            self.last_touch_step = self.steps
+            print(f"  [{self.steps * self.dt:6.1f}s] 墜落・範囲外でリセットされました")
+            return
+        if dist is not None and 0.1 <= dist < self.NEAR_M:
+            self.near_steps += 1
+        if bool((before != after).any()):
+            self.count += 1
+            interval = (self.steps - self.last_touch_step) * self.dt
+            self.last_touch_step = self.steps
+            self.intervals.append(interval)
+            print(f"  [{self.steps * self.dt:6.1f}s] タッチ {self.count} 回目 (前のタッチから {interval:.2f} 秒)")
+
+    def summary(self):
+        print("=== 結果 ===")
+        print(f"実行時間 {self.steps * self.dt:.1f} 秒 / タッチ {self.count} 回 / 墜落 {self.crashes} 回")
+        if self.intervals:
+            print(f"タッチの間隔: 平均 {sum(self.intervals) / len(self.intervals):.2f} 秒 / "
+                  f"最短 {min(self.intervals):.2f} 秒 / 最長 {max(self.intervals):.2f} 秒")
+        near = self.near_steps * self.dt
+        print(f"ゴールの{self.NEAR_M:.1f} m以内で、タッチせずにいた時間: {near:.1f} 秒")
+        if self.steps > 0 and near > 0.3 * self.steps * self.dt:
+            print("[注意] ゴール手前(0.1〜0.2 m)で待っている時間が長い。位置の精度が足りず、タッチの半径(0.1 m)に入れていない可能性がある")
 
 
 if __name__ == "__main__":
@@ -123,9 +202,15 @@ python eval.py -e wind-hovering --run latest --record
 # 旗を非表示にする場合
 python eval.py -e wind-hovering --run latest --no-wind-flag
 
-# 風を旗で可視化(既定で布旗。布が使えない環境では板旗に自動切替)
+# 風を旗で可視化(既定はスプライン曲面の旗。使えない環境ではPBD布→板旗に自動で切り替わる)
 python eval.py -e wind-hovering --run latest
 
-# PBD布を使う場合(粒子表示)
-python eval.py -e wind-hovering --run latest --flag-style cloth
+# PBD布の物理計算にする場合(--pbd は --flag-style cloth-mesh の短縮形)
+python eval.py -e wind-hovering --run latest --pbd
+
+# PBD布の、粒子の速度に風を足す方式にする場合
+python eval.py -e wind-hovering --run latest --flag-style cloth-vel
+
+# 風なしのタッチチャレンジ(ゴールに触れると次のゴールが出る)
+python eval.py -e wind-hovering --run latest --touch
 """
