@@ -1,0 +1,25 @@
+--- git commit ---
+7004be541b6c1db9f3d14647d4d5be0407c92dcc
+
+
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add/rm <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	deleted:    logs/wind-hovering/20261025_205049/cfgs.pkl
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	logs/wind-hovering/20261025_210229/
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/logs/wind-hovering/20261025_205049/cfgs.pkl b/logs/wind-hovering/20261025_205049/cfgs.pkl
+deleted file mode 100644
+index d671b12..0000000
+Binary files a/logs/wind-hovering/20261025_205049/cfgs.pkl and /dev/null differ
