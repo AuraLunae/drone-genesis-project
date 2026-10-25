@@ -63,7 +63,10 @@ def main():
     parser.add_argument("--touch", action="store_true",
                         help="タッチチャレンジ(同じモデルで動く): 風なしで、ゴール(赤い球)にタッチすると次のゴールが出る。"
                              "タッチ回数と間隔を表示する")
-    parser.add_argument("--no-mirror", action="store_true", help="床を鏡面にしない(反射の描画をやめて、さらに軽くする)")
+    parser.add_argument("--mirror", action="store_true", help="床を暗い鏡面にする(既定はGenesis標準の床。反射の描画ぶん重くなる)")
+    parser.add_argument("--record-res", type=str, default="1920x1080", help="録画の解像度(幅x高さ)。既定1920x1080")
+    parser.add_argument("--record-fps", type=int, default=100,
+                        help="録画のfps。既定100(物理が100Hzなので、毎ステップ1コマ。これ以上は上げても同じコマが増えるだけ)")
     parser.add_argument("--full-physics", action="store_true",
                         help="学習時と同じ物理設定(床との衝突判定あり)に戻す。既定は、評価では結果が変わらない衝突判定を切って軽くする")
     parser.add_argument("--unpaced", action="store_true",
@@ -72,6 +75,10 @@ def main():
     if args.pbd and args.flag_style not in (None, "cloth-mesh"):
         parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
     args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or "surface")
+    try:
+        record_w, record_h = (int(v) for v in args.record_res.lower().split("x"))
+    except ValueError:
+        parser.error("--record-res は 1920x1080 のように指定してください")
 
     fast_init(gs.cpu)  # 32bit・performance_mode・PyTorchのスレッド1(軽量設定)
 
@@ -93,12 +100,13 @@ def main():
     env_cfg["visualize_target"] = True
     env_cfg["visualize_camera"] = args.record
     # 風の強さと向きが誰にでも分かるよう、後方に衝突判定のない白い旗を立てる(視点も旗が入る位置になる)
-    env_cfg["visualize_wind_flag"] = not args.no_wind_flag
+    env_cfg["visualize_wind_flag"] = not (args.no_wind_flag or args.touch)  # --touch は風なしなので、旗は出さない
     env_cfg["wind_flag_style"] = args.flag_style
     env_cfg["wind_flag_xy"] = (-4.5, 0.0)   # 旗は奥に置く(遠近法で小さく見える)
     env_cfg["wind_flag_scale"] = 1.2
-    env_cfg["max_visualize_FPS"] = 60
-    env_cfg["floor_mirror"] = not args.no_mirror            # 床は既定で鏡面(暗い床)
+    env_cfg["max_visualize_FPS"] = args.record_fps if args.record else 60   # 録画のfps(start_recordingに渡る)
+    env_cfg["record_res"] = (record_w, record_h)                            # 録画の解像度。録画の時は影も描く
+    env_cfg["floor_mirror"] = args.mirror                   # 既定は標準の床。--mirror の時だけ暗い鏡面
     env_cfg["lite_physics"] = not args.full_physics         # 床との衝突判定を切る(評価では墜落判定が高さなので結果は同じ)
     # 実行時間が学習時のエピソード長(15秒)より長い場合、途中でタイムアウトして初期位置に
     # 戻されないよう、エピソード長も実行時間に合わせて延ばす(墜落・範囲外では従来通りリセットされる)
@@ -225,8 +233,11 @@ python eval.py -e wind-hovering --run latest --flag-style cloth-vel
 # 風なしのタッチチャレンジ(ゴールに触れると次のゴールが出る)
 python eval.py -e wind-hovering --run latest --touch
 
-# 床は既定で鏡面(暗い床)。反射をやめてさらに軽くする場合
-python eval.py -e wind-hovering --run latest --no-mirror
+# 床を暗い鏡面にする(既定はGenesis標準の床)
+python eval.py -e wind-hovering --run latest --mirror
+
+# 録画(既定は1920x1080・100fps・影あり。変える場合)
+python eval.py -e wind-hovering --run latest --record --time 10 --record-res 2560x1440 --record-fps 100
 
 # 学習時と同じ物理設定(衝突判定あり)に戻す / 実時間に合わせず最速で進める
 python eval.py -e wind-hovering --run latest --full-physics

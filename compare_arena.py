@@ -334,7 +334,7 @@ def main():
                              "cloth-vel=PBD布(粒子の速度に風を足す方式) / plate=剛体板")
     parser.add_argument("--pbd", action="store_true",
                         help="旗をPBD布の物理計算にする(--flag-style cloth-mesh の短縮形)")
-    parser.add_argument("--no-mirror", action="store_true", help="床を鏡面にしない(反射の描画をやめて、さらに軽くする)")
+    parser.add_argument("--mirror", action="store_true", help="床を暗い鏡面にする(既定はGenesis標準の床。反射の描画ぶん重くなる)")
     parser.add_argument("--full-physics", action="store_true",
                         help="学習時と同じ物理設定(床との衝突判定あり)に戻す。既定は、衝突判定を切って軽くする")
     args = parser.parse_args()
@@ -371,7 +371,7 @@ def main():
             if args.full_physics
             else lite_rigid_options(DT / 2)
         ),
-        vis_options=lite_vis_options(mirror=not args.no_mirror),  # 床は既定で鏡面。影を切り、座標軸を消す
+        vis_options=lite_vis_options(mirror=args.mirror),  # 影を切り、座標軸を消す。床は標準(--mirror の時だけ鏡面)
         viewer_options=lite_viewer_options(
             camera_pos=(0.0, -6.0, 2.0),
             camera_lookat=(0.0, 0.0, 1.2),
@@ -382,7 +382,7 @@ def main():
         show_viewer=True,
         **wind_flag_scene_kwargs(args.flag_style, WIND_FLAG_SCALE),  # 布の旗用: 布と機体・地面の連成を切るなど
     )
-    add_floor(scene, reflective=not args.no_mirror)
+    add_floor(scene, reflective=args.mirror)
 
     keys = (["AI"] if ai else []) + ["PID", "HUMAN"]
     drones, markers = {}, {}

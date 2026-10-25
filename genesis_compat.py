@@ -103,7 +103,7 @@ class PropellerVisual:
 # ---------------------------------------------------------------------- #
 FLOOR_COLOR = (0.07, 0.08, 0.10, 1.0)  # 床の色。白いと映り込みが見えないので暗くしてある(明るくしたければここ)
 FLOOR_ROUGHNESS = 0.02                 # 小さいほど鏡に近い(0.0〜0.05の範囲で試す)
-VIEW_EVERY_N_STEPS = 2                 # 画面の更新間隔[物理ステップ]。物理100Hzなら、2で50fps / 3で約33fps / 1で毎ステップ(重い)
+VIEW_EVERY_N_STEPS = 1                 # 画面の更新間隔[物理ステップ]。1=間引かない(既定)。2にすると物理100Hzで50fps(軽いが、コマが粗くなる)
 
 
 def fast_init(backend, **kwargs):
@@ -245,16 +245,17 @@ def mirror_floor_surface():
     )
 
 
-def add_floor(scene, reflective=True):
-    """床(Plane)を足す。暗い色の床にする(鏡面にするのは VisOptions の plane_reflection=True、lite_vis_options)。
+def add_floor(scene, reflective=False):
+    """床(Plane)を足す。既定は Genesis の標準の床(何も指定しない)。
 
-    reflective は互換のために残してある(今は常に暗い床。反射の有無は VisOptions で決まる)。
-    表面の設定が通らなければ、通常の床にする。
+    reflective=True(--mirror)の時だけ、暗い色の床にする(鏡面にするのは VisOptions の plane_reflection=True、lite_vis_options)。
+    表面の設定が通らなければ、標準の床にする。
     """
-    try:
-        return scene.add_entity(gs.morphs.Plane(), surface=mirror_floor_surface())
-    except Exception as e:  # noqa: BLE001
-        print(f"[注意] 床の表面設定が通らないため、通常の床にします: {e}")
+    if reflective:
+        try:
+            return scene.add_entity(gs.morphs.Plane(), surface=mirror_floor_surface())
+        except Exception as e:  # noqa: BLE001
+            print(f"[注意] 床の表面設定が通らないため、標準の床にします: {e}")
     return scene.add_entity(gs.morphs.Plane())
 
 

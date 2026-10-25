@@ -79,9 +79,9 @@ class WindHoverEnv:
         show_flag = bool(env_cfg.get("visualize_wind_flag", False))
         flag_style = env_cfg.get("wind_flag_style", "surface")  # 式で形を計算するスプライン曲面(失敗時はPBD布→板)
         flag_scale = env_cfg.get("wind_flag_scale", 1.2)
-        # 画面を出す時(評価など)だけ、床を鏡面にし、影を切り、画面の更新を間引く(見た目だけ)。学習(画面なし)は従来のまま。
-        # 録画中は、動画のコマが欠けないよう、毎ステップ更新する
-        mirror = bool(show_viewer) and bool(env_cfg.get("floor_mirror", True))
+        # 画面を出す時(評価など)は、影・座標軸を切って軽くする(録画中は影を残す)。床は標準のまま、floor_mirror=True の時だけ鏡面
+        # 学習(画面なし)は従来のまま。画面の更新は、VIEW_EVERY_N_STEPS=1(既定)なら毎ステップ。録画中は常に毎ステップ
+        mirror = bool(show_viewer) and bool(env_cfg.get("floor_mirror", False))
         self._view_every = VIEW_EVERY_N_STEPS if (show_viewer and not env_cfg.get("visualize_camera")) else 1
         self._step_i = 0
         # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
@@ -105,9 +105,13 @@ class WindHoverEnv:
                     constraint_solver=gs.constraint_solver.Newton,
                 )
             ),
-            # 画面を出す時は、床を鏡面にして、影を切る(見た目だけ。物理には影響しない)
+            # 画面を出す時は、影・座標軸を切る。--mirror の時だけ床を鏡面にする(見た目だけ。物理には影響しない)
             vis_options=(
-                lite_vis_options(mirror=mirror, rendered_envs_idx=list(range(self.rendered_env_num)))
+                lite_vis_options(
+                    mirror=mirror,
+                    shadow=bool(env_cfg.get("visualize_camera")),  # 録画の時だけ影を描く(画質のため)
+                    rendered_envs_idx=list(range(self.rendered_env_num)),
+                )
                 if show_viewer
                 else gs.options.VisOptions(rendered_envs_idx=list(range(self.rendered_env_num)))
             ),
@@ -139,7 +143,7 @@ class WindHoverEnv:
                 if show_flag
                 else dict(pos=(3.5, 0.0, 2.5), lookat=(0, 0, 0.5), fov=30)
             )
-            self.cam = self.scene.add_camera(res=(640, 480), GUI=True, **record_camera)
+            self.cam = self.scene.add_camera(res=tuple(env_cfg.get("record_res", (640, 480))), GUI=True, **record_camera)
 
         self.base_init_pos = torch.tensor(self.env_cfg["base_init_pos"], device=gs.device)
         self.base_init_quat = torch.tensor(self.env_cfg["base_init_quat"], device=gs.device)
