@@ -55,7 +55,15 @@ from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 from arena_scoring import ContestantScore, FailureRules, ScoringConfig, generate_waypoints, rank
-from genesis_compat import PropellerVisual, apply_com_force, add_floor, reflective_vis_options
+from genesis_compat import (
+    PropellerVisual,
+    add_floor,
+    apply_com_force,
+    fast_init,
+    lite_rigid_options,
+    lite_viewer_options,
+    lite_vis_options,
+)
 from manual_pid_fly import (
     BASE_RPM,
     DT,
@@ -326,12 +334,15 @@ def main():
                              "cloth-vel=PBD布(粒子の速度に風を足す方式) / plate=剛体板")
     parser.add_argument("--pbd", action="store_true",
                         help="旗をPBD布の物理計算にする(--flag-style cloth-mesh の短縮形)")
+    parser.add_argument("--no-mirror", action="store_true", help="床を鏡面にしない(反射の描画をやめて、さらに軽くする)")
+    parser.add_argument("--full-physics", action="store_true",
+                        help="学習時と同じ物理設定(床との衝突判定あり)に戻す。既定は、衝突判定を切って軽くする")
     args = parser.parse_args()
     if args.pbd and args.flag_style not in (None, "cloth-mesh"):
         parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
     args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or "surface")
 
-    gs.init(backend=gs.gpu if args.gpu else gs.cpu)
+    fast_init(gs.gpu if args.gpu else gs.cpu)  # 32bit・performance_mode・PyTorchのスレッド1(軽量設定)
 
     # ---- AIの読み込み(学習済みのランが無ければ、AI無しで続行する) ----
     ai = None
@@ -349,14 +360,19 @@ def main():
     # ---- シーン(物理設定は学習時の WindHoverEnv と同じ) ----
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT),
-        rigid_options=gs.options.RigidOptions(
-            dt=DT / 2,
-            enable_collision=True,
-            enable_joint_limit=True,
-            constraint_solver=gs.constraint_solver.Newton,
+        # 既定は床との衝突判定を切る(失敗判定は高さで行う)。--full-physics で学習時と同じ設定に戻す
+        rigid_options=(
+            gs.options.RigidOptions(
+                dt=DT / 2,
+                enable_collision=True,
+                enable_joint_limit=True,
+                constraint_solver=gs.constraint_solver.Newton,
+            )
+            if args.full_physics
+            else lite_rigid_options(DT / 2)
         ),
-        vis_options=reflective_vis_options(show_world_frame=False),  # 床を若干反射させる
-        viewer_options=gs.options.ViewerOptions(
+        vis_options=lite_vis_options(mirror=not args.no_mirror),  # 床は既定で鏡面。影を切り、座標軸を消す
+        viewer_options=lite_viewer_options(
             camera_pos=(0.0, -6.0, 2.0),
             camera_lookat=(0.0, 0.0, 1.2),
             camera_fov=50,
@@ -366,7 +382,7 @@ def main():
         show_viewer=True,
         **wind_flag_scene_kwargs(args.flag_style, WIND_FLAG_SCALE),  # 布の旗用: 布と機体・地面の連成を切るなど
     )
-    add_floor(scene)
+    add_floor(scene, reflective=not args.no_mirror)
 
     keys = (["AI"] if ai else []) + ["PID", "HUMAN"]
     drones, markers = {}, {}

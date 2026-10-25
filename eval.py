@@ -31,6 +31,7 @@ except (metadata.PackageNotFoundError, ImportError, ValueError) as e:
 from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
+from genesis_compat import RealtimePacer, fast_init
 from wind_flag import ALL_STYLES, legend
 from wind_hover_env import WindHoverEnv
 from run_utils import find_latest_run_dir, find_latest_checkpoint
@@ -62,12 +63,17 @@ def main():
     parser.add_argument("--touch", action="store_true",
                         help="タッチチャレンジ(同じモデルで動く): 風なしで、ゴール(赤い球)にタッチすると次のゴールが出る。"
                              "タッチ回数と間隔を表示する")
+    parser.add_argument("--no-mirror", action="store_true", help="床を鏡面にしない(反射の描画をやめて、さらに軽くする)")
+    parser.add_argument("--full-physics", action="store_true",
+                        help="学習時と同じ物理設定(床との衝突判定あり)に戻す。既定は、評価では結果が変わらない衝突判定を切って軽くする")
+    parser.add_argument("--unpaced", action="store_true",
+                        help="実時間(1倍速)に合わせず、できるだけ速く進める。既定は1倍速(速すぎる分は眠る)。--record の時は常にこちら")
     args = parser.parse_args()
     if args.pbd and args.flag_style not in (None, "cloth-mesh"):
         parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
     args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or "surface")
 
-    gs.init(backend=gs.cpu)
+    fast_init(gs.cpu)  # 32bit・performance_mode・PyTorchのスレッド1(軽量設定)
 
     log_dir = find_latest_run_dir(args.exp_name) if args.run == "latest" else os.path.join("logs", args.exp_name, args.run)
     ckpt_path = (
@@ -92,6 +98,8 @@ def main():
     env_cfg["wind_flag_xy"] = (-4.5, 0.0)   # 旗は奥に置く(遠近法で小さく見える)
     env_cfg["wind_flag_scale"] = 1.2
     env_cfg["max_visualize_FPS"] = 60
+    env_cfg["floor_mirror"] = not args.no_mirror            # 床は既定で鏡面(暗い床)
+    env_cfg["lite_physics"] = not args.full_physics         # 床との衝突判定を切る(評価では墜落判定が高さなので結果は同じ)
     # 実行時間が学習時のエピソード長(15秒)より長い場合、途中でタイムアウトして初期位置に
     # 戻されないよう、エピソード長も実行時間に合わせて延ばす(墜落・範囲外では従来通りリセットされる)
     env_cfg["episode_length_s"] = max(env_cfg["episode_length_s"], args.duration)
@@ -118,6 +126,7 @@ def main():
     max_sim_step = int(args.duration / env.dt)
 
     touch = TouchCounter(env.dt) if args.touch else None
+    pacer = None if (args.record or args.unpaced) else RealtimePacer(env.dt)  # 軽くしたぶん早送りにならないよう、1倍速に合わせる
     if touch:
         print("=== タッチチャレンジ(風なし)。ゴールにタッチすると次のゴールが出ます ===")
 
@@ -127,6 +136,8 @@ def main():
         obs_dict, rews, dones, infos = env.step(actions)
         if touch:
             touch.observe(before, env.commands[0], bool(dones[0]), float(env.rel_pos[0].norm()))
+        if pacer is not None:
+            pacer.wait()
         return obs_dict
 
     with torch.no_grad():
@@ -213,4 +224,11 @@ python eval.py -e wind-hovering --run latest --flag-style cloth-vel
 
 # 風なしのタッチチャレンジ(ゴールに触れると次のゴールが出る)
 python eval.py -e wind-hovering --run latest --touch
+
+# 床は既定で鏡面(暗い床)。反射をやめてさらに軽くする場合
+python eval.py -e wind-hovering --run latest --no-mirror
+
+# 学習時と同じ物理設定(衝突判定あり)に戻す / 実時間に合わせず最速で進める
+python eval.py -e wind-hovering --run latest --full-physics
+python eval.py -e wind-hovering --run latest --unpaced
 """

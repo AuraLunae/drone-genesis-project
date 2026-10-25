@@ -35,7 +35,16 @@ from genesis.utils.geom import (
     transform_quat_by_quat,
 )
 
-from genesis_compat import PropellerVisual, apply_com_force, add_floor, reflective_vis_options
+from genesis_compat import (
+    PropellerVisual,
+    VIEW_EVERY_N_STEPS,
+    add_floor,
+    apply_com_force,
+    lite_rigid_options,
+    lite_viewer_options,
+    lite_vis_options,
+    step_scene,
+)
 from wind_flag import create_wind_flag, wind_flag_scene_kwargs
 
 
@@ -70,6 +79,11 @@ class WindHoverEnv:
         show_flag = bool(env_cfg.get("visualize_wind_flag", False))
         flag_style = env_cfg.get("wind_flag_style", "surface")  # 式で形を計算するスプライン曲面(失敗時はPBD布→板)
         flag_scale = env_cfg.get("wind_flag_scale", 1.2)
+        # 画面を出す時(評価など)だけ、床を鏡面にし、影を切り、画面の更新を間引く(見た目だけ)。学習(画面なし)は従来のまま。
+        # 録画中は、動画のコマが欠けないよう、毎ステップ更新する
+        mirror = bool(show_viewer) and bool(env_cfg.get("floor_mirror", True))
+        self._view_every = VIEW_EVERY_N_STEPS if (show_viewer and not env_cfg.get("visualize_camera")) else 1
+        self._step_i = 0
         # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
         flag_scene_kwargs = wind_flag_scene_kwargs(flag_style, flag_scale) if show_flag else {}
         viewer_camera = (
@@ -80,22 +94,29 @@ class WindHoverEnv:
 
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(dt=self.dt),
-            rigid_options=gs.options.RigidOptions(
-                dt=self.dt / 2,
-                enable_collision=True,
-                enable_joint_limit=True,
-                constraint_solver=gs.constraint_solver.Newton,
+            # eval.py だけ lite_physics=True: 床との衝突判定を切る(墜落の判定は高さで行うので、結果は変わらない)
+            rigid_options=(
+                lite_rigid_options(self.dt / 2)
+                if env_cfg.get("lite_physics", False)
+                else gs.options.RigidOptions(
+                    dt=self.dt / 2,
+                    enable_collision=True,
+                    enable_joint_limit=True,
+                    constraint_solver=gs.constraint_solver.Newton,
+                )
             ),
-            # 旗を出す時(評価)だけ、床を若干反射させる(見た目だけ。物理には影響しない)
-            vis_options=(reflective_vis_options if show_flag else gs.options.VisOptions)(
-                rendered_envs_idx=list(range(self.rendered_env_num)),
+            # 画面を出す時は、床を鏡面にして、影を切る(見た目だけ。物理には影響しない)
+            vis_options=(
+                lite_vis_options(mirror=mirror, rendered_envs_idx=list(range(self.rendered_env_num)))
+                if show_viewer
+                else gs.options.VisOptions(rendered_envs_idx=list(range(self.rendered_env_num)))
             ),
-            viewer_options=gs.options.ViewerOptions(**viewer_camera),
+            viewer_options=lite_viewer_options(**viewer_camera) if show_viewer else gs.options.ViewerOptions(**viewer_camera),
             show_viewer=show_viewer,
             **flag_scene_kwargs,
         )
 
-        add_floor(self.scene, reflective=show_flag)
+        add_floor(self.scene, reflective=mirror)
 
         if self.env_cfg["visualize_target"]:
             self.target = self.scene.add_entity(
@@ -209,7 +230,7 @@ class WindHoverEnv:
         self.wind_sigma[envs_idx] = gs_rand_float(*self.wind_cfg["sigma_range"], (n,), gs.device)
         self.wind_vec[envs_idx] = 0.0
 
-    def _update_and_apply_wind(self):
+    def _update_and_apply_wind(self, draw=True):
         """OU過程で風を更新し、ドローンのCOMリンクへ外力として加える。
 
         注: OU過程はガウスノイズを含むため理論上は無限大の値も取り得る。
@@ -232,8 +253,8 @@ class WindHoverEnv:
 
         apply_com_force(self.drone, self.com_link_idx, self.wind_vec, n_envs=self.num_envs)
 
-        if self.wind_flag is not None:  # 旗は環境0の風を映す(評価時は環境数1)
-            self.wind_flag.update(self.wind_vec[0].detach().cpu().numpy(), self.dt)
+        if self.wind_flag is not None and draw:  # 旗は環境0の風を映す(評価時は環境数1)。画面を更新するステップだけ動かす
+            self.wind_flag.update(self.wind_vec[0].detach().cpu().numpy(), self.dt * self._view_every)
 
     def _at_target(self):
         return (
@@ -253,13 +274,17 @@ class WindHoverEnv:
         if self.prop_visual is not None:
             self.prop_visual.apply(propeller_rpms)  # 表示用のプロペラ角度だけを上書き(物理には影響しない)
 
-        if self.target is not None:
+        # 画面を更新するステップ(draw)だけ、ゴールの球・旗・ビューアを動かす。物理は毎ステップ同じだけ進む
+        self._step_i += 1
+        draw = self._step_i % self._view_every == 0
+
+        if self.target is not None and draw:
             self.target.set_pos(self.commands, zero_velocity=True)
 
         # 風を物理ステップの直前に加える(1 RLステップ=1 scene.step()、dt=0.01)
-        self._update_and_apply_wind()
+        self._update_and_apply_wind(draw)
 
-        self.scene.step()
+        step_scene(self.scene, render=draw)
 
         self.episode_length_buf += 1
         self.last_base_pos[:] = self.base_pos[:]

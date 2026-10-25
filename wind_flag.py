@@ -773,6 +773,16 @@ def wind_flag_scene_kwargs(style="surface", scale=1.0):
         except (AttributeError, TypeError):
             continue
     pbd_candidates = [dict(particle_size=ClothWindFlag.CELL * scale)]
+    if style == "surface":
+        # surfaceの旗は、粒子を全部固定して式で動かすだけで、布の計算は要らない。粒子の動ける範囲を旗の周りに絞り、
+        # 拘束の反復を最小にして、PBDソルバーが毎ステップにする仕事を減らす(通らない版では、下の候補に進む)。
+        # ※ surface が物理のPBD布に切り替わった時(after_buildの警告)は、反復が少ないぶん布が少し伸びる
+        lite = dict(lower_bound=VELOCITY_PBD_LOWER, upper_bound=VELOCITY_PBD_UPPER,
+                    particle_size=ClothWindFlag.CELL * scale)
+        iterations = dict(max_stretch_solver_iterations=1, max_bending_solver_iterations=1,
+                          max_volume_solver_iterations=1, max_density_solver_iterations=1,
+                          max_viscosity_solver_iterations=1)
+        pbd_candidates[:0] = [dict(lite, **iterations), dict(lite)]
     if style == "cloth-vel":
         # 粒子の範囲を実際に使う範囲に絞り、伸びの拘束の反復を増やす(通らない版では、下の候補に進む)
         pbd_candidates.insert(
@@ -788,7 +798,7 @@ def wind_flag_scene_kwargs(style="surface", scale=1.0):
         try:
             kwargs["pbd_options"] = gs.options.PBDOptions(**candidate)
             break
-        except (AttributeError, TypeError):
+        except Exception:  # noqa: BLE001  (TypeErrorだけでなく、pydanticの検証エラーも拾う)
             continue
     return kwargs
 
