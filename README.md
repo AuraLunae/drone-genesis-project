@@ -53,7 +53,7 @@ uv run python compare_arena.py
 旗が垂れているとほぼ無風、持ち上がるほど風が強く、旗が向く方向が風下です。
 `cloth-mesh` は布の物理にGenesisのPBDソルバーを使い、描画は変形する面にするため、大きな粒子が並ぶ表示になりません。
 
-##実際の映像
+## 実際の映像
 
 ### 滞空＆風ありver.
 https://github.com/user-attachments/assets/07adda19-0d83-4aca-bb67-cf0aac6b2a23
