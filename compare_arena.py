@@ -8,7 +8,8 @@ AI・PID・人間の3者が、全く同じ課題を「同時に」行い、点�
   - 人間  : あなたがキーボードで操縦する(manual_raw_fly.py と同じ。モード2送信機相当の4軸操作)
 
 同じ条件の保証:
-  - 同じ機体(CF2X)、同じ物理設定(学習時と同じ RigidOptions)
+  - 同じ機体(CF2X)、同じ物理設定(学習時と同じ dt/2 のサブステップ。既定は床との衝突判定を切って軽くしてあり、
+    --full-physics で学習時と同じ RigidOptions に戻る。失敗判定は高さで行うので、結果は同じはず)
   - 同じ開始位置(各レーンの原点、高さ1.0 m)、同じ目標(レーン原点からの相対座標が同一)
   - 同じ風(同じOU過程の風を、毎ステップ全機の重心に加える。--no-wind で無効)
   - 同じ失敗条件と採点(arena_scoring.py)。失敗条件はAIの学習時の終了条件と同じ
@@ -63,6 +64,7 @@ from genesis_compat import (
     lite_rigid_options,
     lite_viewer_options,
     lite_vis_options,
+    RealtimePacer,
 )
 from manual_pid_fly import (
     BASE_RPM,
@@ -152,15 +154,18 @@ def load_ai_policy(exp_name, run, ckpt):
 class AIDriver:
     """学習済み方策。観測の作り方は WindHoverEnv._update_observation と同一にしてある。"""
 
-    def __init__(self, drone, policy, obs_cfg):
+    def __init__(self, drone, policy, obs_cfg, env_cfg=None):
         self.drone = drone
         self.policy = policy
         self.scales = obs_cfg["obs_scales"]
+        env_cfg = env_cfg or {}
+        self.clip = float(env_cfg.get("clip_actions", 1.0))          # WindHoverEnv.step と同じ行動のクリップ幅
+        num_actions = int(env_cfg.get("num_actions", 4))
         # WindHoverEnv は、観測に「1ステップ前の行動」ではなく「2ステップ前の行動」を入れている
         # (obs を作った後で last_actions を更新する順序のため)。学習時と同じ分布にするため、
         # その挙動をそのまま再現する(prev=直前の行動, prev_prev=その前の行動)。
-        self.prev_actions = torch.zeros((1, 4), device=gs.device)
-        self.prev_prev_actions = torch.zeros((1, 4), device=gs.device)
+        self.prev_actions = torch.zeros((1, num_actions), device=gs.device)
+        self.prev_prev_actions = torch.zeros((1, num_actions), device=gs.device)
 
     def start(self):
         pass
@@ -190,11 +195,14 @@ class AIDriver:
         )
         with torch.no_grad():
             actions = self.policy(TensorDict({"policy": obs}, batch_size=[1]))
-        actions = torch.clip(actions, -1.0, 1.0)
+        actions = torch.clip(actions, -self.clip, self.clip)
         self.prev_prev_actions = self.prev_actions
         self.prev_actions = actions.clone()
         rpms = (1 + actions[0] * AI_RPM_SCALE) * BASE_RPM
-        return [max(0.0, min(float(r), MAX_ABS_RPM)) for r in rpms]
+        # WindHoverEnv.step は RPM を一切クリップしない(最大 (1+0.8)*BASE_RPM ≒ 26043)。25000 で切ると、
+        # 行動が飽和した時に学習時より推力が小さくなり、AIだけ不利になる。学習時と同じ範囲(0〜1.8*BASE_RPM)にする。
+        upper = (1 + self.clip * AI_RPM_SCALE) * BASE_RPM
+        return [max(0.0, min(float(r), upper)) for r in rpms]
 
 
 class PIDDriver:
@@ -261,6 +269,10 @@ class Contestant:
         self.freeze_quat = self.drone.get_quat().clone()
 
     def update_marker(self):
+        """目標の球を、現在の目標の位置に置く。
+
+        球は fixed=False(重力を受ける)なので、WindHoverEnv と同じく **毎ステップ** 呼んで位置と速度を入れ直す
+        (目標が変わった時だけだと、球が落ちて消える)。"""
         target = torch.as_tensor(self.score.current_target, dtype=torch.float32, device=gs.device)
         self.marker.set_pos(target, zero_velocity=True)
 
@@ -408,6 +420,9 @@ def main():
             "genesis-world>=1.4.1 に更新してください(verify_physics.py のテスト4で確認できます)。"
         )
         return
+    # 自己診断の3ステップの間、PID機以外は RPM 未設定のまま落下している。全機を開始位置へ戻して、球も置き直す
+    for c in contestants:
+        c.pin()
 
     human_controller = ManualFlightController(by_key["HUMAN"].drone)
 
@@ -461,7 +476,7 @@ def main():
             c.score = ContestantScore(waypoints_rel + offset, args.time_limit, scoring_cfg, rules)
             c.freeze_pos = c.freeze_quat = None
             if c.key == "AI":
-                c.driver = AIDriver(c.drone, ai_policy, ai_obs_cfg)
+                c.driver = AIDriver(c.drone, ai_policy, ai_obs_cfg, ai_env_cfg)
             elif c.key == "PID":
                 c.driver = PIDDriver(c.drone)
             else:
@@ -485,6 +500,7 @@ def main():
     print(legend(args.flag_style))
 
     # ---- メインループ ----
+    pacer = RealtimePacer(DT)  # 軽量化したぶん早送りにならないよう、実時間(1倍速)に合わせる(人間が操縦するので必須)
     countdown_steps = int(COUNTDOWN_S / DT)
     countdown_left = 0
     sim_time = 0.0
@@ -493,6 +509,8 @@ def main():
 
     try:
         while is_running:
+            pacer.wait()
+
             # --- 状態遷移(Enterキー) ---
             if pending_enter:
                 pending_enter = False
@@ -508,6 +526,7 @@ def main():
             if state in (READY, COUNTDOWN):
                 for c in contestants:
                     c.pin()
+                    c.update_marker()
                 scene.step()
                 wind_flag.update(NO_WIND, DT)   # 競技前は風が無いので、旗は垂れ下がる
                 if state == COUNTDOWN:
@@ -529,12 +548,14 @@ def main():
             if state == FINISHED:
                 for c in contestants:
                     c.pin(c.freeze_pos, c.freeze_quat)
+                    c.update_marker()
                 scene.step()
                 wind_flag.update(NO_WIND, DT)
                 continue
 
             # --- 競技中 ---
             for c in contestants:
+                c.update_marker()  # 球は毎ステップ置き直す(落ちないように)
                 if c.score.running:
                     rpms = c.driver.rpms(c.score.current_target)
                     c.drone.set_propellers_rpm(rpms)
@@ -601,7 +622,7 @@ def main():
         pass
     finally:
         print()
-        gs.logger.info("終了しました。")
+        print("終了しました。")  # fast_init は警告以外のログを消すので、logger.info ではなく print で出す
 
 
 if __name__ == "__main__":
