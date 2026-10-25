@@ -1,9 +1,3 @@
-
-
-https://github.com/user-attachments/assets/f847b437-5ef2-484c-bd34-83ae588e7259
-
-
-
 # ドローン自律飛行プロジェクト
 
 ## プロジェクトの現状
@@ -62,19 +56,13 @@ uv run python compare_arena.py
 ##実際の映像
 
 ### 滞空＆風ありver.
-<video src="[/out/wind_hover.mp4](https://github.com/user-attachments/assets/07adda19-0d83-4aca-bb67-cf0aac6b2a23)" controls width="600"></video>
+https://github.com/user-attachments/assets/07adda19-0d83-4aca-bb67-cf0aac6b2a23
 
 ### タッチ＆風なしver.
-<video src="[/out/wind_hover.mp4](https://github.com/user-attachments/assets/a041f1a5-3dd1-4aff-8da5-e602475e8a30)" controls width="600"></video>
+https://github.com/user-attachments/assets/a041f1a5-3dd1-4aff-8da5-e602475e8a30
 
 
 ## ベースのコード
 * [Genesis world公式 ](https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/examples/drone/hover_train.py)
 * [Qiita WSL2+Ubuntu 24.04でGenesis環境構築～学習までやってみた](https://qiita.com/t_tanno/items/a17f0717d136a4f96da0)
-
-## 動画のURL
-https://github.com/user-attachments/assets/07adda19-0d83-4aca-bb67-cf0aac6b2a23
-
-https://github.com/user-attachments/assets/a041f1a5-3dd1-4aff-8da5-e602475e8a30
-
 
