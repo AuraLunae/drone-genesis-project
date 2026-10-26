@@ -1,0 +1,20 @@
+終了しました。
+Traceback (most recent call last):
+  File "C:\Users\student\Downloads\drone-genesis-project\compare_arena.py", line 629, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\student\Downloads\drone-genesis-project\compare_arena.py", line 528, in main
+    c.pin()
+    ~~~~~^^
+  File "C:\Users\student\Downloads\drone-genesis-project\compare_arena.py", line 265, in pin
+    self.drone.set_propellers_rpm([0.0, 0.0, 0.0, 0.0])
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\student\Downloads\drone-genesis-project\.venv\Lib\site-packages\genesis\engine\entities\rigid_entity\drone_entity.py", line 57, in set_propellers_rpm
+    gs.raise_exception("`set_propellers_rpm` can only be called once per step.")
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\student\Downloads\drone-genesis-project\.venv\Lib\site-packages\genesis\utils\misc.py", line 39, in raise_exception
+    raise gs.GenesisException(msg)
+genesis.GenesisException: `set_propellers_rpm` can only be called once per step.
+
+[Genesis] [15:10:28] [ERROR] GenesisException: `set_propellers_rpm` can only be called once per step.
+(drone-genesis-project) PS C:\Users\student\Downloads\drone-genesis-project> 
