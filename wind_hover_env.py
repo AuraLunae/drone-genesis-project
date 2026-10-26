@@ -35,7 +35,16 @@ from genesis.utils.geom import (
     transform_quat_by_quat,
 )
 
-from genesis_compat import PropellerVisual, apply_com_force
+from genesis_compat import (
+    PropellerVisual,
+    VIEW_EVERY_N_STEPS,
+    add_floor,
+    apply_com_force,
+    lite_rigid_options,
+    lite_viewer_options,
+    lite_vis_options,
+    step_scene,
+)
 from wind_flag import create_wind_flag, wind_flag_scene_kwargs
 
 
@@ -66,35 +75,52 @@ class WindHoverEnv:
 
         # 風の見える化(白い旗)。評価(eval.py)で env_cfg["visualize_wind_flag"]=True にした時だけ出す。
         # 既定の視点(上から見下ろす位置)では、後方に立てた旗が画面の外に出てしまうため、
-        # 旗を出す時だけ、低めに引いた視点に切り替える。
+        # 旗を出す時だけ、低めの視点に切り替える。旗は奥(x=-4.5)に置き、ドローンを大きく映す。
         show_flag = bool(env_cfg.get("visualize_wind_flag", False))
-        flag_style = env_cfg.get("wind_flag_style", "procedural")  # 進行波で動く分割旗(PBD不要・軽量)
-        flag_scale = env_cfg.get("wind_flag_scale", 1.3)
+        flag_style = env_cfg.get("wind_flag_style", "surface")  # 式で形を計算するスプライン曲面(失敗時はPBD布→板)
+        flag_scale = env_cfg.get("wind_flag_scale", 1.2)
+        # 画面を出す時(評価など)は、影・座標軸を切って軽くする(録画中は影を残す)。床は標準のまま、floor_mirror=True の時だけ鏡面
+        # 学習(画面なし)は従来のまま。画面の更新は、VIEW_EVERY_N_STEPS=1(既定)なら毎ステップ。録画中は常に毎ステップ
+        mirror = bool(show_viewer) and bool(env_cfg.get("floor_mirror", False))
+        self._view_every = VIEW_EVERY_N_STEPS if (show_viewer and not env_cfg.get("visualize_camera")) else 1
+        self._step_i = 0
         # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
         flag_scene_kwargs = wind_flag_scene_kwargs(flag_style, flag_scale) if show_flag else {}
         viewer_camera = (
-            dict(camera_pos=(4.5, 0.0, 2.2), camera_lookat=(-1.0, 0.0, 1.3), camera_fov=50)
+            dict(camera_pos=(2.2, 0.0, 1.5), camera_lookat=(-1.0, 0.0, 1.5), camera_fov=45)
             if show_flag
             else dict(camera_pos=(3.0, 0.0, 3.0), camera_lookat=(0.0, 0.0, 1.0), camera_fov=40)
         )
 
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(dt=self.dt),
-            rigid_options=gs.options.RigidOptions(
-                dt=self.dt / 2,
-                enable_collision=True,
-                enable_joint_limit=True,
-                constraint_solver=gs.constraint_solver.Newton,
+            # eval.py だけ lite_physics=True: 床との衝突判定を切る(墜落の判定は高さで行うので、結果は変わらない)
+            rigid_options=(
+                lite_rigid_options(self.dt / 2)
+                if env_cfg.get("lite_physics", False)
+                else gs.options.RigidOptions(
+                    dt=self.dt / 2,
+                    enable_collision=True,
+                    enable_joint_limit=True,
+                    constraint_solver=gs.constraint_solver.Newton,
+                )
             ),
-            vis_options=gs.options.VisOptions(
-                rendered_envs_idx=list(range(self.rendered_env_num)),
+            # 画面を出す時は、影・座標軸を切る。--mirror の時だけ床を鏡面にする(見た目だけ。物理には影響しない)
+            vis_options=(
+                lite_vis_options(
+                    mirror=mirror,
+                    shadow=bool(env_cfg.get("visualize_camera")),  # 録画の時だけ影を描く(画質のため)
+                    rendered_envs_idx=list(range(self.rendered_env_num)),
+                )
+                if show_viewer
+                else gs.options.VisOptions(rendered_envs_idx=list(range(self.rendered_env_num)))
             ),
-            viewer_options=gs.options.ViewerOptions(**viewer_camera),
+            viewer_options=lite_viewer_options(**viewer_camera) if show_viewer else gs.options.ViewerOptions(**viewer_camera),
             show_viewer=show_viewer,
             **flag_scene_kwargs,
         )
 
-        self.scene.add_entity(gs.morphs.Plane())
+        add_floor(self.scene, reflective=mirror)
 
         if self.env_cfg["visualize_target"]:
             self.target = self.scene.add_entity(
@@ -113,11 +139,11 @@ class WindHoverEnv:
 
         if self.env_cfg["visualize_camera"]:
             record_camera = (
-                dict(pos=(4.5, 0.0, 2.2), lookat=(-1.0, 0.0, 1.3), fov=50)
+                dict(pos=(2.2, 0.0, 1.5), lookat=(-1.0, 0.0, 1.5), fov=45)
                 if show_flag
                 else dict(pos=(3.5, 0.0, 2.5), lookat=(0, 0, 0.5), fov=30)
             )
-            self.cam = self.scene.add_camera(res=(640, 480), GUI=True, **record_camera)
+            self.cam = self.scene.add_camera(res=tuple(env_cfg.get("record_res", (640, 480))), GUI=True, **record_camera)
 
         self.base_init_pos = torch.tensor(self.env_cfg["base_init_pos"], device=gs.device)
         self.base_init_quat = torch.tensor(self.env_cfg["base_init_quat"], device=gs.device)
@@ -131,10 +157,12 @@ class WindHoverEnv:
         self.wind_flag = (
             create_wind_flag(
                 self.scene,
-                base_xy=env_cfg.get("wind_flag_xy", (-2.8, 0.0)),
+                base_xy=env_cfg.get("wind_flag_xy", (-4.5, 0.0)),
                 scale=flag_scale,
                 n_envs=num_envs,
                 style=flag_style,
+                # 視点は+x側から-x方向を見る。旗の広い面が見えるよう、最初はy方向へ伸ばす
+                along=env_cfg.get("wind_flag_along", (0.0, 1.0)),
             )
             if show_flag
             else None
@@ -206,7 +234,7 @@ class WindHoverEnv:
         self.wind_sigma[envs_idx] = gs_rand_float(*self.wind_cfg["sigma_range"], (n,), gs.device)
         self.wind_vec[envs_idx] = 0.0
 
-    def _update_and_apply_wind(self):
+    def _update_and_apply_wind(self, draw=True):
         """OU過程で風を更新し、ドローンのCOMリンクへ外力として加える。
 
         注: OU過程はガウスノイズを含むため理論上は無限大の値も取り得る。
@@ -229,8 +257,8 @@ class WindHoverEnv:
 
         apply_com_force(self.drone, self.com_link_idx, self.wind_vec, n_envs=self.num_envs)
 
-        if self.wind_flag is not None:  # 旗は環境0の風を映す(評価時は環境数1)
-            self.wind_flag.update(self.wind_vec[0].detach().cpu().numpy(), self.dt)
+        if self.wind_flag is not None and draw:  # 旗は環境0の風を映す(評価時は環境数1)。画面を更新するステップだけ動かす
+            self.wind_flag.update(self.wind_vec[0].detach().cpu().numpy(), self.dt * self._view_every)
 
     def _at_target(self):
         return (
@@ -250,13 +278,17 @@ class WindHoverEnv:
         if self.prop_visual is not None:
             self.prop_visual.apply(propeller_rpms)  # 表示用のプロペラ角度だけを上書き(物理には影響しない)
 
-        if self.target is not None:
+        # 画面を更新するステップ(draw)だけ、ゴールの球・旗・ビューアを動かす。物理は毎ステップ同じだけ進む
+        self._step_i += 1
+        draw = self._step_i % self._view_every == 0
+
+        if self.target is not None and draw:
             self.target.set_pos(self.commands, zero_velocity=True)
 
         # 風を物理ステップの直前に加える(1 RLステップ=1 scene.step()、dt=0.01)
-        self._update_and_apply_wind()
+        self._update_and_apply_wind(draw)
 
-        self.scene.step()
+        step_scene(self.scene, render=draw)
 
         self.episode_length_buf += 1
         self.last_base_pos[:] = self.base_pos[:]
@@ -271,8 +303,22 @@ class WindHoverEnv:
         self.base_lin_vel[:] = transform_by_quat(self.drone.get_vel(), inv_base_quat)
         self.base_ang_vel[:] = transform_by_quat(self.drone.get_ang(), inv_base_quat)
 
-        envs_idx = self._at_target()
-        self._resample_commands(envs_idx)
+        # ゴールの引き直し。goal_mode で2通り(同じモデルで両方動かせる):
+        #   "hover"(既定): ゴールは一定時間(resampling_time_s)ごとに変わる。触れても変わらない
+        #                   → ゴールの位置で滞空し続けるほど報酬が増える(本来のコンセプト)
+        #   "touch"       : ゴールに触れた(at_target_threshold以内)瞬間に変わる
+        #                   → 触れて次のゴールへ、を繰り返す(eval.py --touch)
+        if self.env_cfg.get("goal_mode", "hover") == "touch":
+            envs_idx = self._at_target()
+        else:
+            interval = max(1, int(round(self.env_cfg["resampling_time_s"] / self.dt)))
+            envs_idx = (self.episode_length_buf % interval == 0).nonzero(as_tuple=False).reshape((-1,))
+        if len(envs_idx) > 0:
+            self._resample_commands(envs_idx)
+            # 新しいゴールに対する相対位置に更新する(古いゴールのままだと、観測が1ステップ古く、
+            # ゴールが飛んだ分が進歩報酬に混ざる)。ゴールが飛んだステップの進歩報酬は0にする
+            self.rel_pos[envs_idx] = self.commands[envs_idx] - self.base_pos[envs_idx]
+            self.last_rel_pos[envs_idx] = self.rel_pos[envs_idx]
 
         self.crash_condition = (
             (torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"])

@@ -28,7 +28,7 @@ from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
 from wind_hover_env import WindHoverEnv
-from run_utils import new_run_dir, resolve_resume_target
+from run_utils import launch_tensorboard, new_run_dir, resolve_resume_target
 
 
 def get_train_cfg(exp_name):
@@ -93,6 +93,10 @@ def get_cfgs():
         "base_init_quat": [1.0, 0.0, 0.0, 0.0],
         "episode_length_s": 15.0,
         "at_target_threshold": 0.1,
+        # ゴールを引き直す間隔[s]。ゴールの位置で滞空し続ける学習なので、触れてもゴールは変わらず、
+        # この時間ごとに変わる("hover")。"touch" にすると、触れた瞬間に変わる(eval.py --touch が指定する)。
+        # 同じモデルが両方で使える: どちらでも観測は「ゴールまでの相対位置」だけだから。
+        "goal_mode": "hover",
         "resampling_time_s": 3.0,
         "simulate_action_latency": True,
         "clip_actions": 1.0,
@@ -158,6 +162,8 @@ def main():
     parser.add_argument("-b", "--num-envs", type=int, default=16384, help="並列環境数。VRAMが足りない場合は下げる")
     parser.add_argument("--max-iterations", type=int, default=601, help="新規学習なら総イテレーション数、--resume指定時はそこからの追加イテレーション数")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--no-tb", action="store_true", help="TensorBoardを自動で起動しない")
+    parser.add_argument("--tb-port", type=int, default=6006, help="TensorBoardのポート(使用中なら次の空きポート)")
     parser.add_argument(
         "--resume",
         type=str,
@@ -188,6 +194,11 @@ def main():
         with open(os.path.join(log_dir, "cfgs.pkl"), "wb") as f:
             pickle.dump([env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg, train_cfg], f)
         print(f"=== 新規学習: {log_dir} ===")
+
+    # 環境のビルド(数十秒かかる)より前に起動しておく。ブラウザは準備ができ次第、自動で開く。
+    # 学習が終わる/中断した時には、TensorBoardも自動で停止する。
+    if not args.no_tb:
+        launch_tensorboard(os.path.join("logs", args.exp_name), port=args.tb_port)
 
     env = WindHoverEnv(
         num_envs=args.num_envs,

@@ -40,6 +40,21 @@ BASE_RPM = 14468.429183500699  # CF2Xのホバリング基準RPM(公式サンプ
 MIN_RPM = 0.9 * BASE_RPM  # 公式 fly_route.py のクランプ範囲をそのまま使用
 MAX_RPM = 1.5 * BASE_RPM
 
+# 公式 fly_route.py の値をそのまま使用("parameters are tuned such that the drone can fly, not
+# optimized" との注記あり)。他のスクリプト(compare_arena.py)からも使えるよう、モジュール定数にしてある。
+# 順序: 位置x,y,z / 速度x,y,z / 姿勢roll,pitch,yaw、各 [Kp, Ki, Kd]
+OFFICIAL_PID_PARAMS = [
+    [2.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    [2.0, 0.0, 0.0],
+    [20.0, 0.0, 20.0],
+    [20.0, 0.0, 20.0],
+    [25.0, 0.0, 20.0],
+    [10.0, 0.0, 1.0],
+    [10.0, 0.0, 1.0],
+    [2.0, 0.0, 0.2],
+]
+
 
 # ---------------------------------------------------------------------- #
 # quadcopter_controller.py を踏襲したカスケードPID(公式実装をそのまま移植)
@@ -184,19 +199,7 @@ def main():
     )
     scene.viewer.follow_entity(drone)
 
-    # 公式 fly_route.py の値をそのまま使用
-    # ("parameters are tuned such that the drone can fly, not optimized" との注記あり)
-    pid_params = [
-        [2.0, 0.0, 0.0],
-        [2.0, 0.0, 0.0],
-        [2.0, 0.0, 0.0],
-        [20.0, 0.0, 20.0],
-        [20.0, 0.0, 20.0],
-        [25.0, 0.0, 20.0],
-        [10.0, 0.0, 1.0],
-        [10.0, 0.0, 1.0],
-        [2.0, 0.0, 0.2],
-    ]
+    pid_params = OFFICIAL_PID_PARAMS
 
     scene.build()
 

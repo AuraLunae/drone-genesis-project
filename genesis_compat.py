@@ -15,6 +15,9 @@ Genesisの「版による違い」を1か所に集約する共通モジュール
                     ref=gs.link_ref_frame.link_COM, local=False)。差動RPMのトルクは正しく生じる。
 """
 
+import inspect
+import time
+
 import torch
 
 import genesis as gs
@@ -93,3 +96,169 @@ class PropellerVisual:
         rpm_tensor = rpm_tensor.reshape(-1, 1) if rpm_tensor.ndim == 1 else rpm_tensor.T
         self._revs = (self._revs + rpm_tensor * self.VISUAL_SCALE) % self._wrap
         revs.copy_(self._revs)
+
+
+# ---------------------------------------------------------------------- #
+# 鏡面の床と、描画・実行の軽量化(見た目と速さだけ。lite_rigid_options以外は物理の結果を変えない)
+# ---------------------------------------------------------------------- #
+FLOOR_COLOR = (0.07, 0.08, 0.10, 1.0)  # 床の色。白いと映り込みが見えないので暗くしてある(明るくしたければここ)
+FLOOR_ROUGHNESS = 0.02                 # 小さいほど鏡に近い(0.0〜0.05の範囲で試す)
+VIEW_EVERY_N_STEPS = 1                 # 画面の更新間隔[物理ステップ]。1=間引かない(既定)。2にすると物理100Hzで50fps(軽いが、コマが粗くなる)
+
+
+def fast_init(backend, **kwargs):
+    """gs.init を軽量設定で呼ぶ(32bit・警告以外のログなし・performance_mode)。通らない引数があれば外してやり直す。
+
+    あわせて、小さなテンソルばかりの処理でスレッドの取り合いが起きないよう、PyTorchのスレッド数を1にする
+    (評価・アリーナ用。学習は train.py が自前で gs.init を呼ぶ)。
+    """
+    options = dict(precision="32", logging_level="warning", performance_mode=True)
+    options.update(kwargs)
+    try:
+        torch.set_num_threads(1)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        gs.init(backend=backend, **options)
+    except TypeError:
+        gs.init(backend=backend, **kwargs)
+
+
+def _first_working(makers):
+    """作る関数を順に試し、最初に通ったものを返す。TypeErrorだけでなく、pydanticの検証エラー(ValueError)も拾う。"""
+    last = None
+    for make in makers:
+        try:
+            return make()
+        except Exception as error:  # noqa: BLE001
+            last = error
+    raise last
+
+
+def lite_vis_options(mirror=True, **kwargs):
+    """画面を出す時の VisOptions。影を切り、座標軸を消し、床を鏡面反射にする(見た目だけ)。
+
+    通らない引数は、影 → 座標軸 → 反射 の順にあきらめて作り直す。
+    """
+    options = dict(shadow=False, show_world_frame=False)
+    if mirror:
+        options["plane_reflection"] = True
+    options.update(kwargs)
+    notes = {
+        "shadow": "影を切れない",
+        "show_world_frame": "座標軸を消せない",
+        "plane_reflection": "床の反射ができない(鏡面になりません)",
+    }
+    while True:
+        try:
+            return gs.options.VisOptions(**options)
+        except Exception:  # noqa: BLE001
+            for key in ("shadow", "show_world_frame", "plane_reflection"):
+                if key in options:
+                    del options[key]
+                    print(f"[注意] この版の VisOptions では{notes[key]}ため、その設定なしで続けます")
+                    break
+            else:
+                raise
+
+
+def lite_viewer_options(**kwargs):
+    """画面を出す時の ViewerOptions。左上の操作ヒント(毎フレームの文字描画)を消す。通らなければ、そのまま作る。"""
+    try:
+        return gs.options.ViewerOptions(disable_help_text=True, **kwargs)
+    except Exception:  # noqa: BLE001
+        return gs.options.ViewerOptions(**kwargs)
+
+
+def lite_rigid_options(dt):
+    """評価・アリーナ用の RigidOptions。床との衝突判定と関節制限を切る(毎ステップの接触計算が無駄なので)。
+
+    墜落の判定は高さ(termination_if_close_to_ground など)で行い、1機が自由飛行するだけなので、
+    地面に触れる前に終わる。学習時と同じ dt/2 のサブステップは変えない(方策が学習した物理を保つため)。
+    """
+    return _first_working(
+        [
+            lambda: gs.options.RigidOptions(
+                dt=dt,
+                enable_collision=False,
+                enable_joint_limit=False,
+                constraint_solver=gs.constraint_solver.Newton,
+            ),
+            lambda: gs.options.RigidOptions(dt=dt, enable_collision=False, enable_joint_limit=False),
+        ]
+    )
+
+
+_STEP_CAN_SKIP_DRAW = {}
+
+
+def step_scene(scene, render=True):
+    """scene.step() を呼ぶ。render=False の時は、画面(ビューア)の更新だけを省く(物理は同じだけ進む)。
+
+    `update_visualizer` 引数が無い版では、普通に scene.step() を呼ぶ。
+    """
+    if render:
+        scene.step()
+        return
+    if "ok" not in _STEP_CAN_SKIP_DRAW:
+        try:
+            _STEP_CAN_SKIP_DRAW["ok"] = "update_visualizer" in inspect.signature(scene.step).parameters
+        except (TypeError, ValueError):
+            _STEP_CAN_SKIP_DRAW["ok"] = False
+    if _STEP_CAN_SKIP_DRAW["ok"]:
+        scene.step(update_visualizer=False)
+    else:
+        scene.step()
+
+
+class RealtimePacer:
+    """シミュレーションの進みを実時間(1倍速)に合わせる。速く進みすぎた分だけ眠る(待つ間はCPUを使わない)。
+
+    軽くしたぶん、実時間より速く進んで早送りに見えないようにする。遅れている時は何もしない。
+    """
+
+    def __init__(self, dt):
+        self.dt = float(dt)
+        self._t0 = None
+        self._n = 0
+
+    def wait(self):
+        now = time.perf_counter()
+        if self._t0 is None:
+            self._t0 = now
+            return
+        self._n += 1
+        ahead = self._t0 + self._n * self.dt - now
+        if ahead > 0.002:
+            time.sleep(ahead - 0.001)
+        elif ahead < -0.25:  # 大きく遅れた(読み込みなど)時は、基準を取り直す
+            self._t0, self._n = now, 0
+
+
+def mirror_floor_surface():
+    """暗くてつるつるの床の表面。白い床では、白い旗や明るい機体の映り込みが見えない。"""
+    return _first_working(
+        [
+            lambda: gs.surfaces.Default(color=FLOOR_COLOR, roughness=FLOOR_ROUGHNESS),
+            lambda: gs.surfaces.Default(color=FLOOR_COLOR),
+        ]
+    )
+
+
+def add_floor(scene, reflective=False):
+    """床(Plane)を足す。既定は Genesis の標準の床(何も指定しない)。
+
+    reflective=True(--mirror)の時だけ、暗い色の床にする(鏡面にするのは VisOptions の plane_reflection=True、lite_vis_options)。
+    表面の設定が通らなければ、標準の床にする。
+    """
+    if reflective:
+        try:
+            return scene.add_entity(gs.morphs.Plane(), surface=mirror_floor_surface())
+        except Exception as e:  # noqa: BLE001
+            print(f"[注意] 床の表面設定が通らないため、標準の床にします: {e}")
+    return scene.add_entity(gs.morphs.Plane())
+
+
+def reflective_vis_options(**kwargs):
+    """互換用。床を鏡面反射にした VisOptions(lite_vis_options と同じ)。"""
+    return lite_vis_options(mirror=True, **kwargs)

@@ -8,7 +8,8 @@ AI・PID・人間の3者が、全く同じ課題を「同時に」行い、点�
   - 人間  : あなたがキーボードで操縦する(manual_raw_fly.py と同じ。モード2送信機相当の4軸操作)
 
 同じ条件の保証:
-  - 同じ機体(CF2X)、同じ物理設定(学習時と同じ RigidOptions)
+  - 同じ機体(CF2X)、同じ物理設定(学習時と同じ dt/2 のサブステップ。既定は床との衝突判定を切って軽くしてあり、
+    --full-physics で学習時と同じ RigidOptions に戻る。失敗判定は高さで行うので、結果は同じはず)
   - 同じ開始位置(各レーンの原点、高さ1.0 m)、同じ目標(レーン原点からの相対座標が同一)
   - 同じ風(同じOU過程の風を、毎ステップ全機の重心に加える。--no-wind で無効)
   - 同じ失敗条件と採点(arena_scoring.py)。失敗条件はAIの学習時の終了条件と同じ
@@ -55,7 +56,16 @@ from genesis.utils.geom import inv_quat, quat_to_xyz, transform_by_quat
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 from arena_scoring import ContestantScore, FailureRules, ScoringConfig, generate_waypoints, rank
-from genesis_compat import PropellerVisual, apply_com_force
+from genesis_compat import (
+    PropellerVisual,
+    add_floor,
+    apply_com_force,
+    fast_init,
+    lite_rigid_options,
+    lite_viewer_options,
+    lite_vis_options,
+    RealtimePacer,
+)
 from manual_pid_fly import (
     BASE_RPM,
     DT,
@@ -80,10 +90,12 @@ COUNTDOWN_S = 3.0
 MAX_ABS_RPM = 25000.0
 AI_RPM_SCALE = 0.8  # wind_hover_env.py の step() と同じ: rpm = (1 + action * 0.8) * BASE_RPM
 RESULTS_DIR = os.path.join("logs", "arena")
-# 風を映す白い旗(衝突判定なし)。カメラ(y=-8から+y方向を見る)の反対側、つまり3機の後方(背景側)に立てる。
-# カメラから遠い(約11.5 m)ので、eval.py(約7 m)より大きくしてある。
+# 風を映す白い旗(衝突判定なし)。カメラ(y=-6から+y方向を見る)の反対側、つまり3機の後方(背景側)に立てる。
+# カメラから遠い(水平で約9.5 m)ので、eval.py(約6.7 m)より大きくしてある。
 WIND_FLAG_XY = (0.0, 3.5)
 WIND_FLAG_SCALE = 1.6
+# 旗が最初に伸びる向き。カメラは-y側から+y方向を見るので、広い面が見えるよう、最初はx方向へ伸ばす
+WIND_FLAG_ALONG = (1.0, 0.0)
 NO_WIND = np.zeros(3)
 
 # 状態
@@ -142,15 +154,18 @@ def load_ai_policy(exp_name, run, ckpt):
 class AIDriver:
     """学習済み方策。観測の作り方は WindHoverEnv._update_observation と同一にしてある。"""
 
-    def __init__(self, drone, policy, obs_cfg):
+    def __init__(self, drone, policy, obs_cfg, env_cfg=None):
         self.drone = drone
         self.policy = policy
         self.scales = obs_cfg["obs_scales"]
+        env_cfg = env_cfg or {}
+        self.clip = float(env_cfg.get("clip_actions", 1.0))          # WindHoverEnv.step と同じ行動のクリップ幅
+        num_actions = int(env_cfg.get("num_actions", 4))
         # WindHoverEnv は、観測に「1ステップ前の行動」ではなく「2ステップ前の行動」を入れている
         # (obs を作った後で last_actions を更新する順序のため)。学習時と同じ分布にするため、
         # その挙動をそのまま再現する(prev=直前の行動, prev_prev=その前の行動)。
-        self.prev_actions = torch.zeros((1, 4), device=gs.device)
-        self.prev_prev_actions = torch.zeros((1, 4), device=gs.device)
+        self.prev_actions = torch.zeros((1, num_actions), device=gs.device)
+        self.prev_prev_actions = torch.zeros((1, num_actions), device=gs.device)
 
     def start(self):
         pass
@@ -180,11 +195,14 @@ class AIDriver:
         )
         with torch.no_grad():
             actions = self.policy(TensorDict({"policy": obs}, batch_size=[1]))
-        actions = torch.clip(actions, -1.0, 1.0)
+        actions = torch.clip(actions, -self.clip, self.clip)
         self.prev_prev_actions = self.prev_actions
         self.prev_actions = actions.clone()
         rpms = (1 + actions[0] * AI_RPM_SCALE) * BASE_RPM
-        return [max(0.0, min(float(r), MAX_ABS_RPM)) for r in rpms]
+        # WindHoverEnv.step は RPM を一切クリップしない(最大 (1+0.8)*BASE_RPM ≒ 26043)。25000 で切ると、
+        # 行動が飽和した時に学習時より推力が小さくなり、AIだけ不利になる。学習時と同じ範囲(0〜1.8*BASE_RPM)にする。
+        upper = (1 + self.clip * AI_RPM_SCALE) * BASE_RPM
+        return [max(0.0, min(float(r), upper)) for r in rpms]
 
 
 class PIDDriver:
@@ -251,6 +269,10 @@ class Contestant:
         self.freeze_quat = self.drone.get_quat().clone()
 
     def update_marker(self):
+        """目標の球を、現在の目標の位置に置く。
+
+        球は fixed=False(重力を受ける)なので、WindHoverEnv と同じく **毎ステップ** 呼んで位置と速度を入れ直す
+        (目標が変わった時だけだと、球が落ちて消える)。"""
         target = torch.as_tensor(self.score.current_target, dtype=torch.float32, device=gs.device)
         self.marker.set_pos(target, zero_velocity=True)
 
@@ -319,11 +341,20 @@ def main():
     parser.add_argument("--no-wind", action="store_true", help="風を無効にする")
     parser.add_argument("--gpu", action="store_true", help="GPUで実行する(既定はCPU。3機だけなのでCPUで十分)")
     parser.add_argument("--no-prop-fix", action="store_true", help="プロペラ回転の表示補正を無効にする")
-    parser.add_argument("--flag-style", choices=ALL_STYLES, default="procedural",
-                        help="風を映す旗の種類。procedural=進行波の分割旗(既定) / cloth-mesh=PBD布の変形メッシュ / cloth=PBD粒子 / plate=剛体板")
+    parser.add_argument("--flag-style", choices=ALL_STYLES, default=None,
+                        help="風を映す旗の種類。surface=式で形を計算するスプライン曲面(既定) / cloth-mesh=PBD布 / cloth=PBD粒子 / "
+                             "cloth-vel=PBD布(粒子の速度に風を足す方式) / plate=剛体板")
+    parser.add_argument("--pbd", action="store_true",
+                        help="旗をPBD布の物理計算にする(--flag-style cloth-mesh の短縮形)")
+    parser.add_argument("--mirror", action="store_true", help="床を暗い鏡面にする(既定はGenesis標準の床。反射の描画ぶん重くなる)")
+    parser.add_argument("--full-physics", action="store_true",
+                        help="学習時と同じ物理設定(床との衝突判定あり)に戻す。既定は、衝突判定を切って軽くする")
     args = parser.parse_args()
+    if args.pbd and args.flag_style not in (None, "cloth-mesh"):
+        parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
+    args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or "surface")
 
-    gs.init(backend=gs.gpu if args.gpu else gs.cpu)
+    fast_init(gs.gpu if args.gpu else gs.cpu)  # 32bit・performance_mode・PyTorchのスレッド1(軽量設定)
 
     # ---- AIの読み込み(学習済みのランが無ければ、AI無しで続行する) ----
     ai = None
@@ -341,16 +372,21 @@ def main():
     # ---- シーン(物理設定は学習時の WindHoverEnv と同じ) ----
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT),
-        rigid_options=gs.options.RigidOptions(
-            dt=DT / 2,
-            enable_collision=True,
-            enable_joint_limit=True,
-            constraint_solver=gs.constraint_solver.Newton,
+        # 既定は床との衝突判定を切る(失敗判定は高さで行う)。--full-physics で学習時と同じ設定に戻す
+        rigid_options=(
+            gs.options.RigidOptions(
+                dt=DT / 2,
+                enable_collision=True,
+                enable_joint_limit=True,
+                constraint_solver=gs.constraint_solver.Newton,
+            )
+            if args.full_physics
+            else lite_rigid_options(DT / 2)
         ),
-        vis_options=gs.options.VisOptions(show_world_frame=False),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -8.0, 2.5),
-            camera_lookat=(0.0, 0.0, 1.0),
+        vis_options=lite_vis_options(mirror=args.mirror),  # 影を切り、座標軸を消す。床は標準(--mirror の時だけ鏡面)
+        viewer_options=lite_viewer_options(
+            camera_pos=(0.0, -6.0, 2.0),
+            camera_lookat=(0.0, 0.0, 1.2),
             camera_fov=50,
             realtime_factor=1.0,
             run_in_thread=False,
@@ -358,7 +394,7 @@ def main():
         show_viewer=True,
         **wind_flag_scene_kwargs(args.flag_style, WIND_FLAG_SCALE),  # 布の旗用: 布と機体・地面の連成を切るなど
     )
-    scene.add_entity(gs.morphs.Plane())
+    add_floor(scene, reflective=args.mirror)
 
     keys = (["AI"] if ai else []) + ["PID", "HUMAN"]
     drones, markers = {}, {}
@@ -370,7 +406,8 @@ def main():
             morph=gs.morphs.Mesh(file="meshes/sphere.obj", scale=0.06, fixed=False, collision=False),
             surface=gs.surfaces.Rough(diffuse_texture=gs.textures.ColorTexture(color=MARKER_COLORS[key])),
         )
-    wind_flag = create_wind_flag(scene, base_xy=WIND_FLAG_XY, scale=WIND_FLAG_SCALE, style=args.flag_style)
+    wind_flag = create_wind_flag(scene, base_xy=WIND_FLAG_XY, scale=WIND_FLAG_SCALE, style=args.flag_style,
+                                 along=WIND_FLAG_ALONG)
     scene.build()
     wind_flag.after_build()  # 布の旗は、build の後に支柱へ留める
 
@@ -383,6 +420,9 @@ def main():
             "genesis-world>=1.4.1 に更新してください(verify_physics.py のテスト4で確認できます)。"
         )
         return
+    # 自己診断の3ステップの間、PID機以外は RPM 未設定のまま落下している。全機を開始位置へ戻して、球も置き直す
+    for c in contestants:
+        c.pin()
 
     human_controller = ManualFlightController(by_key["HUMAN"].drone)
 
@@ -436,7 +476,7 @@ def main():
             c.score = ContestantScore(waypoints_rel + offset, args.time_limit, scoring_cfg, rules)
             c.freeze_pos = c.freeze_quat = None
             if c.key == "AI":
-                c.driver = AIDriver(c.drone, ai_policy, ai_obs_cfg)
+                c.driver = AIDriver(c.drone, ai_policy, ai_obs_cfg, ai_env_cfg)
             elif c.key == "PID":
                 c.driver = PIDDriver(c.drone)
             else:
@@ -460,6 +500,7 @@ def main():
     print(legend(args.flag_style))
 
     # ---- メインループ ----
+    pacer = RealtimePacer(DT)  # 軽量化したぶん早送りにならないよう、実時間(1倍速)に合わせる(人間が操縦するので必須)
     countdown_steps = int(COUNTDOWN_S / DT)
     countdown_left = 0
     sim_time = 0.0
@@ -468,6 +509,8 @@ def main():
 
     try:
         while is_running:
+            pacer.wait()
+
             # --- 状態遷移(Enterキー) ---
             if pending_enter:
                 pending_enter = False
@@ -483,6 +526,7 @@ def main():
             if state in (READY, COUNTDOWN):
                 for c in contestants:
                     c.pin()
+                    c.update_marker()
                 scene.step()
                 wind_flag.update(NO_WIND, DT)   # 競技前は風が無いので、旗は垂れ下がる
                 if state == COUNTDOWN:
@@ -504,12 +548,14 @@ def main():
             if state == FINISHED:
                 for c in contestants:
                     c.pin(c.freeze_pos, c.freeze_quat)
+                    c.update_marker()
                 scene.step()
                 wind_flag.update(NO_WIND, DT)
                 continue
 
             # --- 競技中 ---
             for c in contestants:
+                c.update_marker()  # 球は毎ステップ置き直す(落ちないように)
                 if c.score.running:
                     rpms = c.driver.rpms(c.score.current_target)
                     c.drone.set_propellers_rpm(rpms)
@@ -576,7 +622,7 @@ def main():
         pass
     finally:
         print()
-        gs.logger.info("終了しました。")
+        print("終了しました。")  # fast_init は警告以外のログを消すので、logger.info ではなく print で出す
 
 
 if __name__ == "__main__":
