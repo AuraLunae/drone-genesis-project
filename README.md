@@ -66,3 +66,6 @@ https://github.com/user-attachments/assets/a041f1a5-3dd1-4aff-8da5-e602475e8a30
 * [Genesis world公式 ](https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/examples/drone/hover_train.py)
 * [Qiita WSL2+Ubuntu 24.04でGenesis環境構築～学習までやってみた](https://qiita.com/t_tanno/items/a17f0717d136a4f96da0)
 
+## アセット
+風車の3Dモデル: Slurpson  
+https://makerworld.com/ja/models/2583892-garden-windmill#profileId-2850182

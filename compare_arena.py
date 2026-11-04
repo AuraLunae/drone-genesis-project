@@ -258,11 +258,15 @@ class Contestant:
         self.freeze_quat = None
         self.last_dist = float("nan")
 
-    def pin(self, pos=None, quat=None):
-        """指定の位置・姿勢(既定は開始位置)に固定し、プロペラを止める"""
+    def pin(self, pos=None, quat=None, zero_rpm=True):
+        """指定の位置・姿勢(既定は開始位置)に固定し、プロペラを止める。
+
+        set_propellers_rpm は1ステップに1回しか呼べない。直後に scene.step() が入らない呼び出し
+        (自己診断の後の復帰)では zero_rpm=False にして、位置・姿勢だけを戻す。"""
         self.drone.set_pos(self.start_pos if pos is None else pos, zero_velocity=True)
         self.drone.set_quat(self.start_quat if quat is None else quat, zero_velocity=True)
-        self.drone.set_propellers_rpm([0.0, 0.0, 0.0, 0.0])
+        if zero_rpm:
+            self.drone.set_propellers_rpm([0.0, 0.0, 0.0, 0.0])
 
     def freeze_here(self):
         self.freeze_pos = self.drone.get_pos().clone()
@@ -420,9 +424,11 @@ def main():
             "genesis-world>=1.4.1 に更新してください(verify_physics.py のテスト4で確認できます)。"
         )
         return
-    # 自己診断の3ステップの間、PID機以外は RPM 未設定のまま落下している。全機を開始位置へ戻して、球も置き直す
+    # 自己診断の3ステップの間、PID機以外は RPM 未設定のまま落下している。全機を開始位置へ戻す。
+    # ここは scene.step() の直後ではなく、次の while ループの最初の周回(READY)でも pin() が RPM を設定するので、
+    # ここでは RPM を設定しない(同じステップで set_propellers_rpm を2回呼ぶと例外になる)
     for c in contestants:
-        c.pin()
+        c.pin(zero_rpm=False)
 
     human_controller = ManualFlightController(by_key["HUMAN"].drone)
 
