@@ -1,0 +1,15 @@
+{
+  "units": "m",
+  "height_m": 0.2587261219024658,
+  "pivot_z_m": 0.185,
+  "rotor_mount_m": [
+    0.0166,
+    0.0,
+    0.032
+  ],
+  "rotor_radius_m": 0.08292376806465726,
+  "spin_sign": -1,
+  "stand_top_mm": 194.30000307763672,
+  "tower_extra_mm": 110.0,
+  "tower_width_scale": 0.7
+}
