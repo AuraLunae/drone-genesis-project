@@ -9,8 +9,18 @@ WindHoverEnv の評価スクリプト。
   # 実行時間を変える(秒)
   python eval.py --time 120
 
-  # 風なしで、ゴールを次々にタッチしていく(タッチするたびに次のゴールが出る)
+  # ゴールを次々にタッチしていく(タッチするたびに次のゴールが出る。--touch の既定は風なし)
   python eval.py --touch
+
+  # 風ありで、ゴールを次々にタッチ(--wind で学習時の風。強さ・乱れの範囲も指定できる)
+  python eval.py --touch --wind
+  python eval.py --touch --wind-strength 0.05 0.12 --wind-sigma 0.02 0.05
+
+  # 風なしで評価(--touch なしでも使える)
+  python eval.py --no-wind
+
+  # ロール・ピッチの角度でも墜落とみなす(学習時と同じ。既定は、角度では止めない)
+  python eval.py --angle-crash
 
   # 特定のランの特定チェックポイントを評価
   python eval.py -e wind-hovering --run 20261004_120000 --ckpt 300
@@ -37,6 +47,58 @@ from wind_hover_env import WindHoverEnv
 from run_utils import find_latest_run_dir, find_latest_checkpoint
 
 
+def wind_settings(args, wind_cfg):
+    """風の設定を、コマンドラインの指定に合わせて直す。戻り値: (wind_cfg, 風が入るか)。
+
+    通常の評価は、学習時の風(cfgs.pkl)のまま。--touch は風なしが既定。
+    --wind / --wind-strength / --wind-sigma を付ければ、--touch でも風が入る。--no-wind は、どちらでも風なし。"""
+    wind_on = not args.touch
+    if args.wind or args.wind_strength is not None or args.wind_sigma is not None:
+        wind_on = True
+    if args.no_wind:
+        wind_on = False
+    if not wind_on:
+        return dict(wind_cfg, strength_range=[0.0, 0.0], sigma_range=[0.0, 0.0]), False
+    wind_cfg = dict(wind_cfg)
+    if args.wind_strength is not None:
+        wind_cfg["strength_range"] = list(args.wind_strength)
+    if args.wind_sigma is not None:
+        wind_cfg["sigma_range"] = list(args.wind_sigma)
+    return wind_cfg, True
+
+
+def apply_crash_settings(args, env_cfg):
+    """評価では、ロール・ピッチの角度では墜落とみなさない(--angle-crash で、学習時と同じに戻す)。
+
+    墜落とみなす条件のうち、角度(ロール・ピッチ)だけを無効にする。地面に近づく(高さ)・ゴールから離れすぎ・
+    角速度が大きすぎる、の条件は、そのまま。ひっくり返っても、実際に墜落する(地面に近づく)まで続く。"""
+    if not args.angle_crash:
+        env_cfg["termination_if_roll_greater_than"] = float("inf")
+        env_cfg["termination_if_pitch_greater_than"] = float("inf")
+
+
+def describe_settings(wind_cfg, wind_on, env_cfg):
+    """風と墜落判定の設定を、起動時に1度だけ表示するための文。"""
+    if wind_on:
+        lo, hi = wind_cfg["strength_range"]
+        slo, shi = wind_cfg["sigma_range"]
+        wind = f"風: あり(強さ {lo:g}〜{hi:g} N / 乱れ {slo:g}〜{shi:g}。エピソードごとに向きと強さを抽選)"
+    else:
+        wind = "風: なし"
+    roll, pitch = env_cfg["termination_if_roll_greater_than"], env_cfg["termination_if_pitch_greater_than"]
+    if roll == float("inf") and pitch == float("inf"):
+        angle = "ロール・ピッチの角度: 墜落とみなさない"
+    else:
+        angle = f"ロール {roll:g}度・ピッチ {pitch:g}度を超えたら墜落"
+    ang_vel = env_cfg.get("termination_if_ang_vel_greater_than")
+    others = [f"高さ {env_cfg['termination_if_close_to_ground']:g} m 未満",
+              f"ゴールから x/y {env_cfg['termination_if_x_greater_than']:g}・{env_cfg['termination_if_y_greater_than']:g} m、"
+              f"z {env_cfg['termination_if_z_greater_than']:g} m を超えて離れる"]
+    if ang_vel is not None:
+        others.append(f"角速度 {ang_vel:g} rad/s 超")
+    return f"{wind}\n墜落・リセットの条件: {angle} / " + " / ".join(others)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp-name", type=str, default="wind-hovering")
@@ -61,8 +123,19 @@ def main():
     parser.add_argument("-t", "--time", dest="duration", type=float, default=60.0,
                         help="実行時間[秒]。既定60秒(旧版は約9秒だった)。録画時もこの長さになる")
     parser.add_argument("--touch", action="store_true",
-                        help="タッチチャレンジ(同じモデルで動く): 風なしで、ゴール(赤い球)にタッチすると次のゴールが出る。"
-                             "タッチ回数と間隔を表示する")
+                        help="タッチチャレンジ(同じモデルで動く): ゴール(赤い球)にタッチすると次のゴールが出る。"
+                             "タッチ回数と間隔を表示する。既定は風なし(--wind などで風を入れられる)")
+    parser.add_argument("--wind", action="store_true",
+                        help="風を入れる(学習時の風の設定)。--touch の既定は風なしなので、これで入れる。--touch なしでは、もともと風あり")
+    parser.add_argument("--no-wind", action="store_true", help="風なしにする(--touch なしでも使える)")
+    parser.add_argument("--wind-strength", type=float, nargs=2, metavar=("LOW", "HIGH"), default=None,
+                        help="風の強さの範囲[N]を、学習時の設定(cfgs.pkl)から変える。エピソードごとに、この範囲で強さを抽選する。"
+                             "指定すると、--touch でも風が入る")
+    parser.add_argument("--wind-sigma", type=float, nargs=2, metavar=("LOW", "HIGH"), default=None,
+                        help="風の乱れの強さの範囲を、学習時の設定から変える。指定すると、--touch でも風が入る")
+    parser.add_argument("--angle-crash", action="store_true",
+                        help="ロール・ピッチの角度(学習時は60度)を超えたら墜落とみなして打ち切る(学習時と同じ)。"
+                             "既定は、評価では角度で止めず、地面に近づくなどで実際に墜落するまで続ける")
     parser.add_argument("--mirror", action="store_true", help="床を暗い鏡面にする(既定はGenesis標準の床。反射の描画ぶん重くなる)")
     parser.add_argument("--record-res", type=str, default="1920x1080", help="録画の解像度(幅x高さ)。既定1920x1080")
     parser.add_argument("--record-fps", type=int, default=100,
@@ -75,6 +148,12 @@ def main():
     if args.pbd and args.flag_style not in (None, "cloth-mesh"):
         parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
     args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or DEFAULT_STYLE)
+    if args.no_wind and (args.wind or args.wind_strength is not None or args.wind_sigma is not None):
+        parser.error("--no-wind は、--wind・--wind-strength・--wind-sigma と併用できません")
+    for name in ("wind_strength", "wind_sigma"):
+        pair = getattr(args, name)
+        if pair is not None and not (0.0 <= pair[0] <= pair[1]):
+            parser.error(f"--{name.replace('_', '-')} は 0 <= LOW <= HIGH の順に指定してください: {pair}")
     try:
         record_w, record_h = (int(v) for v in args.record_res.lower().split("x"))
     except ValueError:
@@ -91,16 +170,16 @@ def main():
         env_cfg, obs_cfg, reward_cfg, command_cfg, wind_cfg, train_cfg = pickle.load(f)
 
     reward_cfg["reward_scales"] = {}
+    wind_cfg, wind_on = wind_settings(args, wind_cfg)
+    apply_crash_settings(args, env_cfg)
     if args.touch:
-        # 風なし: 風の強さ・乱れを0にする(旗は垂れ下がったままになる)
-        wind_cfg = dict(wind_cfg, strength_range=[0.0, 0.0], sigma_range=[0.0, 0.0])
         # 触れた瞬間にゴールが変わるルールにする(学習時の既定は、時間でゴールが変わる"hover")。
         # 観測は「ゴールまでの相対位置」だけなので、同じモデルがそのまま使える
         env_cfg["goal_mode"] = "touch"
     env_cfg["visualize_target"] = True
     env_cfg["visualize_camera"] = args.record
     # 風の強さと向きが誰にでも分かるよう、後方に衝突判定のない風車(既定。旗にもできる)を立てる(視点も入る位置になる)
-    env_cfg["visualize_wind_flag"] = not (args.no_wind_flag or args.touch)  # --touch は風なしなので、旗は出さない
+    env_cfg["visualize_wind_flag"] = wind_on and not args.no_wind_flag  # 風なしの時は、風車(旗)は出さない
     env_cfg["wind_flag_style"] = args.flag_style
     env_cfg["wind_flag_xy"] = (-4.5, 0.0)   # 旗は奥に置く(遠近法で小さく見える)
     env_cfg["wind_flag_scale"] = 1.2
@@ -124,6 +203,7 @@ def main():
 
     if env.wind_flag is not None:
         print(legend(env.wind_flag.style))
+    print(describe_settings(wind_cfg, wind_on, env_cfg))
     print(f"=== 評価対象: {ckpt_path} ===")
     runner = OnPolicyRunner(env, train_cfg, log_dir, device=gs.device)
     runner.load(ckpt_path)
@@ -136,7 +216,7 @@ def main():
     touch = TouchCounter(env.dt) if args.touch else None
     pacer = None if (args.record or args.unpaced) else RealtimePacer(env.dt)  # 軽くしたぶん早送りにならないよう、1倍速に合わせる
     if touch:
-        print("=== タッチチャレンジ(風なし)。ゴールにタッチすると次のゴールが出ます ===")
+        print(f"=== タッチチャレンジ({'風あり' if wind_on else '風なし'})。ゴールにタッチすると次のゴールが出ます ===")
 
     def step_once(obs_dict):
         before = env.commands[0].clone() if touch else None
@@ -233,8 +313,18 @@ python eval.py -e wind-hovering --run latest --pbd
 # PBD布の、粒子の速度に風を足す方式にする場合
 python eval.py -e wind-hovering --run latest --flag-style cloth-vel
 
-# 風なしのタッチチャレンジ(ゴールに触れると次のゴールが出る)
+# タッチチャレンジ(ゴールに触れると次のゴールが出る。既定は風なし)
 python eval.py -e wind-hovering --run latest --touch
+
+# 風ありのタッチチャレンジ(学習時の風 / 強さ・乱れの範囲を指定)
+python eval.py -e wind-hovering --run latest --touch --wind
+python eval.py -e wind-hovering --run latest --touch --wind-strength 0.05 0.12 --wind-sigma 0.02 0.05
+
+# 風なしで評価する(--touch なしでも)
+python eval.py -e wind-hovering --run latest --no-wind
+
+# ロール・ピッチの角度でも墜落とみなす(学習時と同じ。既定は、角度では止めない)
+python eval.py -e wind-hovering --run latest --angle-crash
 
 # 床を暗い鏡面にする(既定はGenesis標準の床)
 python eval.py -e wind-hovering --run latest --mirror
