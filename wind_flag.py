@@ -1,4 +1,4 @@
-"""Visualize the simulated wind with a non-colliding flag."""
+"""Visualize the simulated wind with a non-colliding wind turbine (default) or flag."""
 
 import math
 import os
@@ -8,13 +8,17 @@ import genesis as gs
 import numpy as np
 import torch
 
+import wind_turbine
+
 G = 9.81
 FULL_SCALE_N = 0.13
 SMOOTHING_S = 0.15
 CALM_N = 0.003
-ALL_STYLES = ("surface", "cloth-mesh", "cloth", "cloth-vel", "plate")
+ALL_STYLES = ("turbine", "surface", "cloth-mesh", "cloth", "cloth-vel", "plate")
+DEFAULT_STYLE = "turbine"  # 既定は風車(wind_turbine.py)。部品が無い・作れない時は、剛体の板の旗に切り替わる
 _CLOTH_VIS_MODE = {"surface": "visual", "cloth-mesh": "visual", "cloth": "particle", "cloth-vel": "visual"}
 _STYLE_LABEL = {
+    "turbine": "風車",
     "surface": "式で形を計算したスプライン曲面",
     "cloth-mesh": "PBDソルバーの布",
     "cloth": "PBDソルバーの布(粒子表示)",
@@ -33,8 +37,10 @@ TENSION_OMEGA = 2.0 * math.pi * 3.0  # 布の伸び縮みの固有角周波数 [
 TENSION_ZETA = 0.25  # 同・減衰比
 
 
-def legend(style="surface"):
-    """旗の見方を簡潔に説明する。"""
+def legend(style=DEFAULT_STYLE):
+    """旗(または風車)の見方を簡潔に説明する。"""
+    if style == "turbine":
+        return wind_turbine.legend()
     kind = _STYLE_LABEL.get(style, "旗")
     return (
         f"白い旗 = 風の見える化({kind}・衝突判定なし): "
@@ -761,7 +767,7 @@ class VelocityClothWindFlag(ClothWindFlag):
             self._warn(f"粒子の速度を更新できませんでした({type(error).__name__}: {error})。旗への風の反映を止めます")
 
 
-def wind_flag_scene_kwargs(style="surface", scale=1.0):
+def wind_flag_scene_kwargs(style=DEFAULT_STYLE, scale=1.0):
     """Return optional Genesis scene settings needed by PBD cloth."""
     if style not in _CLOTH_VIS_MODE:
         return {}
@@ -803,14 +809,33 @@ def wind_flag_scene_kwargs(style="surface", scale=1.0):
     return kwargs
 
 
-def create_wind_flag(scene, base_xy, scale=1.0, n_envs=0, style="surface", along=(1.0, 0.0)):
-    """Create the requested flag; fall back surface -> PBD cloth -> rigid plate on failure.
+def create_wind_flag(scene, base_xy, scale=1.0, n_envs=0, style=DEFAULT_STYLE, along=(1.0, 0.0), turbine_height=None):
+    """Create the requested wind indicator (default: wind turbine); fall back on failure.
+
+    turbine(既定) -> 部品が無い・作れない時は剛体の板の旗 / surface -> PBD布 -> 剛体の板
 
     along: 旗が最初に伸びる水平方向。カメラの視線に垂直にすると、旗の広い面が見える
-           (eval.py の視点なら (0, 1)、compare_arena.py の視点なら (1, 0))。
+           (eval.py の視点なら (0, 1)、compare_arena.py の視点なら (1, 0))。風車では使わない。
+    turbine_height: 風車の高さ[m]。省略時は scale から決める(scale 1.6 → 2.2 m、eval.py の 1.2 → 1.65 m)。
     """
     if style not in ALL_STYLES:
         raise ValueError(f"style must be one of {ALL_STYLES}: {style}")
+    if style == "turbine":
+        missing = wind_turbine.missing_assets()
+        if missing:
+            print(
+                f"[警告] 風車の部品がありません({', '.join(missing)} / 場所: {wind_turbine.ASSET_DIR})。剛体の板の旗に切り替えます。"
+                " 風車を使うには、wind_turbine_assets.zip をプロジェクトのフォルダに展開するか、"
+                "`uv run python prepare_wind_turbine_assets.py WindTurbineWithBallBearingsV2_stls.zip` を実行してください"
+            )
+            style = "plate"
+        else:
+            try:
+                height = wind_turbine.HEIGHT_PER_SCALE * scale if turbine_height is None else turbine_height
+                return wind_turbine.WindTurbine(scene, base_xy, height=height, n_envs=n_envs)
+            except Exception as error:  # noqa: BLE001
+                print(f"[警告] 風車を作成できないため、剛体の板の旗に切り替えます: {type(error).__name__}: {error}")
+                style = "plate"
     if style == "surface":
         try:
             return SurfaceWindFlag(scene, base_xy, scale=scale, n_envs=n_envs, style="surface", along=along)

@@ -32,7 +32,7 @@ from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
 from genesis_compat import RealtimePacer, fast_init
-from wind_flag import ALL_STYLES, legend
+from wind_flag import ALL_STYLES, DEFAULT_STYLE, legend
 from wind_hover_env import WindHoverEnv
 from run_utils import find_latest_run_dir, find_latest_checkpoint
 
@@ -43,18 +43,18 @@ def main():
     parser.add_argument("--run", type=str, default="latest", help="'latest'、またはタイムスタンプ(run_id)を指定")
     parser.add_argument("--ckpt", type=int, default=None, help="イテレーション番号。省略時はそのランの最新チェックポイント")
     parser.add_argument("-r", "--record", action="store_true", help="Record the rollout to video")
-    parser.add_argument("--no-wind-flag", action="store_true", help="風を表示する旗を非表示にする")
+    parser.add_argument("--no-wind-flag", action="store_true", help="風を表示する風車(旗)を非表示にする")
     parser.add_argument(
         "--flag-style",
         "--wind-flag",
         dest="flag_style",
         nargs="?",
-        const="surface",
+        const=DEFAULT_STYLE,
         choices=ALL_STYLES,
-        default=None,  # 未指定なら surface(--pbd が付けば cloth-mesh)
-        metavar="{surface,cloth-mesh,cloth,cloth-vel,plate}",
-        help="風を映す旗。既定は式で形を計算するスプライン曲面。cloth-meshはPBD布、clothは粒子表示、"
-             "cloth-velはPBD布(粒子の速度に風を足す方式)、plateは剛体板",
+        default=None,  # 未指定なら DEFAULT_STYLE(風車。--pbd が付けば cloth-mesh)
+        metavar="{turbine,surface,cloth-mesh,cloth,cloth-vel,plate}",
+        help="風を映すもの。既定は風車(turbine。部品が無い時は板の旗)。surfaceは式で形を計算するスプライン曲面の旗、"
+             "cloth-meshはPBD布の旗、clothは粒子表示、cloth-velはPBD布(粒子の速度に風を足す方式)、plateは剛体板の旗",
     )
     parser.add_argument("--pbd", action="store_true",
                         help="旗をPBD布の物理計算にする(--flag-style cloth-mesh の短縮形)")
@@ -74,7 +74,7 @@ def main():
     args = parser.parse_args()
     if args.pbd and args.flag_style not in (None, "cloth-mesh"):
         parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
-    args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or "surface")
+    args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or DEFAULT_STYLE)
     try:
         record_w, record_h = (int(v) for v in args.record_res.lower().split("x"))
     except ValueError:
@@ -99,7 +99,7 @@ def main():
         env_cfg["goal_mode"] = "touch"
     env_cfg["visualize_target"] = True
     env_cfg["visualize_camera"] = args.record
-    # 風の強さと向きが誰にでも分かるよう、後方に衝突判定のない白い旗を立てる(視点も旗が入る位置になる)
+    # 風の強さと向きが誰にでも分かるよう、後方に衝突判定のない風車(既定。旗にもできる)を立てる(視点も入る位置になる)
     env_cfg["visualize_wind_flag"] = not (args.no_wind_flag or args.touch)  # --touch は風なしなので、旗は出さない
     env_cfg["wind_flag_style"] = args.flag_style
     env_cfg["wind_flag_xy"] = (-4.5, 0.0)   # 旗は奥に置く(遠近法で小さく見える)
@@ -218,11 +218,14 @@ python eval.py -e wind-hovering --run latest
 # 録画したい場合
 python eval.py -e wind-hovering --run latest --record
 
-# 旗を非表示にする場合
+# 風車(旗)を非表示にする場合
 python eval.py -e wind-hovering --run latest --no-wind-flag
 
-# 風を旗で可視化(既定はスプライン曲面の旗。使えない環境ではPBD布→板旗に自動で切り替わる)
+# 風を風車で可視化(既定。部品 assets/wind_turbine/ が無い時は、板の旗に自動で切り替わる)
 python eval.py -e wind-hovering --run latest
+
+# 風車の代わりに、スプライン曲面の旗にする場合
+python eval.py -e wind-hovering --run latest --flag-style surface
 
 # PBD布の物理計算にする場合(--pbd は --flag-style cloth-mesh の短縮形)
 python eval.py -e wind-hovering --run latest --pbd

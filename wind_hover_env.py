@@ -45,7 +45,7 @@ from genesis_compat import (
     lite_vis_options,
     step_scene,
 )
-from wind_flag import create_wind_flag, wind_flag_scene_kwargs
+from wind_flag import DEFAULT_STYLE, create_wind_flag, wind_flag_scene_kwargs
 
 
 def gs_rand_float(lower, upper, shape, device):
@@ -73,18 +73,18 @@ class WindHoverEnv:
         self.obs_scales = obs_cfg["obs_scales"]
         self.reward_scales = copy.deepcopy(reward_cfg["reward_scales"])
 
-        # 風の見える化(白い旗)。評価(eval.py)で env_cfg["visualize_wind_flag"]=True にした時だけ出す。
+        # 風の見える化(既定は風車。旗にもできる)。評価(eval.py)で env_cfg["visualize_wind_flag"]=True にした時だけ出す。
         # 既定の視点(上から見下ろす位置)では、後方に立てた旗が画面の外に出てしまうため、
         # 旗を出す時だけ、低めの視点に切り替える。旗は奥(x=-4.5)に置き、ドローンを大きく映す。
         show_flag = bool(env_cfg.get("visualize_wind_flag", False))
-        flag_style = env_cfg.get("wind_flag_style", "surface")  # 式で形を計算するスプライン曲面(失敗時はPBD布→板)
+        flag_style = env_cfg.get("wind_flag_style", DEFAULT_STYLE)  # 既定は風車(部品が無い時は板の旗)。surface=スプライン曲面の旗など
         flag_scale = env_cfg.get("wind_flag_scale", 1.2)
         # 画面を出す時(評価など)は、影・座標軸を切って軽くする(録画中は影を残す)。床は標準のまま、floor_mirror=True の時だけ鏡面
         # 学習(画面なし)は従来のまま。画面の更新は、VIEW_EVERY_N_STEPS=1(既定)なら毎ステップ。録画中は常に毎ステップ
         mirror = bool(show_viewer) and bool(env_cfg.get("floor_mirror", False))
         self._view_every = VIEW_EVERY_N_STEPS if (show_viewer and not env_cfg.get("visualize_camera")) else 1
         self._step_i = 0
-        # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(板の旗なら空)
+        # 布(PBD)の旗には、布とドローン・地面の連成を切る設定などが要る(風車・板の旗なら空)
         flag_scene_kwargs = wind_flag_scene_kwargs(flag_style, flag_scale) if show_flag else {}
         viewer_camera = (
             dict(camera_pos=(2.2, 0.0, 1.5), camera_lookat=(-1.0, 0.0, 1.5), camera_fov=45)
@@ -153,7 +153,7 @@ class WindHoverEnv:
             morph=gs.morphs.Drone(file="urdf/drones/cf2x.urdf")
         )
 
-        # 風の強さと向きを映す白い旗(衝突判定なし)。ドローンの後方(カメラの反対側)に立てる。
+        # 風の強さと向きを映す風車(既定。旗にもできる。衝突判定なし)。ドローンの後方(カメラの反対側)に立てる。
         self.wind_flag = (
             create_wind_flag(
                 self.scene,

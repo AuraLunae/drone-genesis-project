@@ -31,8 +31,9 @@ AI・PID・人間の3者が、全く同じ課題を「同時に」行い、点�
   Esc         : 終了
 
 画面: 左から AI(青)・PID(緑)・人間(橙)のレーン。球は各自の「現在の目標」(色はレーンと対応)。
-      3機の後方に立つ白い旗は、風の強さと向きを映す(衝突判定なし)。垂れ下がる=無風、持ち上がるほど強風、
-      旗が向く方向=風下。詳しくは wind_flag.py を参照。コンソールにも風の強さ[N]を表示する。
+      3機の後方に立つ風車は、風の強さと向きを映す(衝突判定なし)。羽根の回る速さ=風の強さ(無風で止まる)、
+      羽根が向く方=風上(尾翼が風下)。詳しくは wind_turbine.py を参照。コンソールにも風の強さ[N]を表示する。
+      風車の部品(assets/wind_turbine/)が無い時は、板の旗に切り替わる。--flag-style で旗(スプライン曲面など)にもできる。
 
 実行:
   uv run python compare_arena.py                  # AI・PID・人間の3者(AIは最新の学習ランを使う)
@@ -77,7 +78,7 @@ from manual_pid_fly import (
 )
 from manual_raw_fly import ManualFlightController, check_native_attitude_torque, register_first_free_key
 from run_utils import find_latest_checkpoint, find_latest_run_dir
-from wind_flag import ALL_STYLES, create_wind_flag, legend, wind_flag_scene_kwargs
+from wind_flag import ALL_STYLES, DEFAULT_STYLE, create_wind_flag, legend, wind_flag_scene_kwargs
 
 # ---------------------------------------------------------------------- #
 # 設定
@@ -90,11 +91,11 @@ COUNTDOWN_S = 3.0
 MAX_ABS_RPM = 25000.0
 AI_RPM_SCALE = 0.8  # wind_hover_env.py の step() と同じ: rpm = (1 + action * 0.8) * BASE_RPM
 RESULTS_DIR = os.path.join("logs", "arena")
-# 風を映す白い旗(衝突判定なし)。カメラ(y=-6から+y方向を見る)の反対側、つまり3機の後方(背景側)に立てる。
-# カメラから遠い(水平で約9.5 m)ので、eval.py(約6.7 m)より大きくしてある。
+# 風を映す風車(既定。--flag-style で旗にもできる。衝突判定なし)。カメラ(y=-6から+y方向を見る)の反対側、つまり3機の後方(背景側)に立てる。
+# カメラから遠い(水平で約9.5 m)ので、eval.py(約6.7 m)より大きくしてある(scale 1.6 → 風車の高さは約2.2 m、羽根の半径は約1.2 m)。
 WIND_FLAG_XY = (0.0, 3.5)
 WIND_FLAG_SCALE = 1.6
-# 旗が最初に伸びる向き。カメラは-y側から+y方向を見るので、広い面が見えるよう、最初はx方向へ伸ばす
+# 旗が最初に伸びる向き(風車では使わない)。カメラは-y側から+y方向を見るので、広い面が見えるよう、最初はx方向へ伸ばす
 WIND_FLAG_ALONG = (1.0, 0.0)
 NO_WIND = np.zeros(3)
 
@@ -346,8 +347,8 @@ def main():
     parser.add_argument("--gpu", action="store_true", help="GPUで実行する(既定はCPU。3機だけなのでCPUで十分)")
     parser.add_argument("--no-prop-fix", action="store_true", help="プロペラ回転の表示補正を無効にする")
     parser.add_argument("--flag-style", choices=ALL_STYLES, default=None,
-                        help="風を映す旗の種類。surface=式で形を計算するスプライン曲面(既定) / cloth-mesh=PBD布 / cloth=PBD粒子 / "
-                             "cloth-vel=PBD布(粒子の速度に風を足す方式) / plate=剛体板")
+                        help="風を映すものの種類。turbine=風車(既定。部品が無い時は板の旗) / surface=式で形を計算するスプライン曲面の旗 / "
+                             "cloth-mesh=PBD布の旗 / cloth=PBD粒子 / cloth-vel=PBD布(粒子の速度に風を足す方式) / plate=剛体板の旗")
     parser.add_argument("--pbd", action="store_true",
                         help="旗をPBD布の物理計算にする(--flag-style cloth-mesh の短縮形)")
     parser.add_argument("--mirror", action="store_true", help="床を暗い鏡面にする(既定はGenesis標準の床。反射の描画ぶん重くなる)")
@@ -356,7 +357,7 @@ def main():
     args = parser.parse_args()
     if args.pbd and args.flag_style not in (None, "cloth-mesh"):
         parser.error("--pbd は --flag-style cloth-mesh と同じ意味です。他の旗のスタイルとは併用できません")
-    args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or "surface")
+    args.flag_style = "cloth-mesh" if args.pbd else (args.flag_style or DEFAULT_STYLE)
 
     fast_init(gs.gpu if args.gpu else gs.cpu)  # 32bit・performance_mode・PyTorchのスレッド1(軽量設定)
 
@@ -396,7 +397,7 @@ def main():
             run_in_thread=False,
         ),
         show_viewer=True,
-        **wind_flag_scene_kwargs(args.flag_style, WIND_FLAG_SCALE),  # 布の旗用: 布と機体・地面の連成を切るなど
+        **wind_flag_scene_kwargs(args.flag_style, WIND_FLAG_SCALE),  # 布の旗用: 布と機体・地面の連成を切るなど(風車なら空)
     )
     add_floor(scene, reflective=args.mirror)
 
@@ -534,7 +535,7 @@ def main():
                     c.pin()
                     c.update_marker()
                 scene.step()
-                wind_flag.update(NO_WIND, DT)   # 競技前は風が無いので、旗は垂れ下がる
+                wind_flag.update(NO_WIND, DT)   # 競技前は風が無いので、風車の羽根は止まっていき、旗は垂れ下がる
                 if state == COUNTDOWN:
                     countdown_left -= 1
                     seconds_left = int(np.ceil(countdown_left * DT))
@@ -576,7 +577,7 @@ def main():
                 for c in contestants:
                     if c.score.running:
                         apply_com_force(c.drone, c.com_link_idx, wind_force)
-            wind_flag.update(wind_force, DT)   # 旗にも同じ風を映す(強さと向きがそのまま分かる)
+            wind_flag.update(wind_force, DT)   # 風車(旗)にも同じ風を映す(強さと向きがそのまま分かる)
 
             scene.step()
             sim_time += DT
